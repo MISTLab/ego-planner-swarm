@@ -413,66 +413,74 @@ namespace ego_planner
       return;
     }
 
-    // Step 1. receive the trajectories
-    planner_manager_->swarm_trajs_buf_.clear();
-    planner_manager_->swarm_trajs_buf_.resize(msg->traj.size());
-
-    // 处理每条路径
+    // Step 1. merge the startup trajectories (SwarmDeck: into the live buffer,
+    // which is never cleared; an entry only fills a missing or older one, since
+    // a retained startup snapshot can be older than the peer's broadcasts).
+    SwarmTrajData &buf = planner_manager_->swarm_trajs_buf_;
     for (size_t i = 0; i < msg->traj.size(); i++)
     {
+      const traj_utils::msg::Bspline &traj = msg->traj[i];
+
       // only support B-spline order equals 3; an absent drone leaves an empty entry.
-      if (msg->traj[i].order != 3 || msg->traj[i].pos_pts.size() < 3 || msg->traj[i].knots.size() < 2)
+      if ((int)i == planner_manager_->pp_.drone_id || traj.order != 3 || traj.pos_pts.size() < 3 || traj.knots.size() < 2)
+        continue;
+
+      if (buf.size() > i && buf[i].drone_id == (int)i &&
+          buf[i].start_time_.seconds() >= rclcpp::Time(traj.start_time).seconds())
       {
-        planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
+        RCLCPP_INFO(node_->get_logger(), "Startup trajectory of drone %d is older than its live one: kept the live one.", (int)i);
         continue;
       }
 
-      Eigen::Vector3d cp0(msg->traj[i].pos_pts[0].x, msg->traj[i].pos_pts[0].y, msg->traj[i].pos_pts[0].z);
-      Eigen::Vector3d cp1(msg->traj[i].pos_pts[1].x, msg->traj[i].pos_pts[1].y, msg->traj[i].pos_pts[1].z);
-      Eigen::Vector3d cp2(msg->traj[i].pos_pts[2].x, msg->traj[i].pos_pts[2].y, msg->traj[i].pos_pts[2].z);
+      Eigen::Vector3d cp0(traj.pos_pts[0].x, traj.pos_pts[0].y, traj.pos_pts[0].z);
+      Eigen::Vector3d cp1(traj.pos_pts[1].x, traj.pos_pts[1].y, traj.pos_pts[1].z);
+      Eigen::Vector3d cp2(traj.pos_pts[2].x, traj.pos_pts[2].y, traj.pos_pts[2].z);
       Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
       if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
-      {
-        planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
         continue;
+
+      for (size_t j = buf.size(); j <= i; j++)
+      {
+        OneTrajDataOfSwarm blank;
+        blank.drone_id = -1;
+        buf.push_back(blank);
       }
 
       // 存储路径控制点和节点
-      Eigen::MatrixXd pos_pts(3, msg->traj[i].pos_pts.size());
-      Eigen::VectorXd knots(msg->traj[i].knots.size());
-      for (size_t j = 0; j < msg->traj[i].knots.size(); ++j)
+      Eigen::MatrixXd pos_pts(3, traj.pos_pts.size());
+      Eigen::VectorXd knots(traj.knots.size());
+      for (size_t j = 0; j < traj.knots.size(); ++j)
       {
-        knots(j) = msg->traj[i].knots[j];
+        knots(j) = traj.knots[j];
       }
-      for (size_t j = 0; j < msg->traj[i].pos_pts.size(); ++j)
+      for (size_t j = 0; j < traj.pos_pts.size(); ++j)
       {
-        pos_pts(0, j) = msg->traj[i].pos_pts[j].x;
-        pos_pts(1, j) = msg->traj[i].pos_pts[j].y;
-        pos_pts(2, j) = msg->traj[i].pos_pts[j].z;
+        pos_pts(0, j) = traj.pos_pts[j].x;
+        pos_pts(1, j) = traj.pos_pts[j].y;
+        pos_pts(2, j) = traj.pos_pts[j].z;
       }
 
-      planner_manager_->swarm_trajs_buf_[i].drone_id = i;
+      buf[i].drone_id = i;
 
       // 计算路径持续时间
-      if (msg->traj[i].order % 2)
+      if (traj.order % 2)
       {
-        double cutback = (double)msg->traj[i].order / 2 + 1.5;
-        planner_manager_->swarm_trajs_buf_[i].duration_ = msg->traj[i].knots[msg->traj[i].knots.size() - ceil(cutback)];
+        double cutback = (double)traj.order / 2 + 1.5;
+        buf[i].duration_ = traj.knots[traj.knots.size() - ceil(cutback)];
       }
       else
       {
-        double cutback = (double)msg->traj[i].order / 2 + 1.5;
-        planner_manager_->swarm_trajs_buf_[i].duration_ = (msg->traj[i].knots[msg->traj[i].knots.size() - floor(cutback)] + msg->traj[i].knots[msg->traj[i].knots.size() - ceil(cutback)]) / 2;
+        double cutback = (double)traj.order / 2 + 1.5;
+        buf[i].duration_ = (traj.knots[traj.knots.size() - floor(cutback)] + traj.knots[traj.knots.size() - ceil(cutback)]) / 2;
       }
 
-      // planner_manager_->swarm_trajs_buf_[i].position_traj_ =
-      UniformBspline pos_traj(pos_pts, msg->traj[i].order, msg->traj[i].knots[1] - msg->traj[i].knots[0]);
+      UniformBspline pos_traj(pos_pts, traj.order, traj.knots[1] - traj.knots[0]);
       pos_traj.setKnot(knots);
-      planner_manager_->swarm_trajs_buf_[i].position_traj_ = pos_traj;
+      buf[i].position_traj_ = pos_traj;
 
-      planner_manager_->swarm_trajs_buf_[i].start_pos_ = planner_manager_->swarm_trajs_buf_[i].position_traj_.evaluateDeBoorT(0);
+      buf[i].start_pos_ = buf[i].position_traj_.evaluateDeBoorT(0);
 
-      planner_manager_->swarm_trajs_buf_[i].start_time_ = msg->traj[i].start_time;
+      buf[i].start_time_ = traj.start_time;
     }
 
     have_recv_pre_agent_ = true;

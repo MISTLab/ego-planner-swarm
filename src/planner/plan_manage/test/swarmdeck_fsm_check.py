@@ -32,11 +32,12 @@ from geometry_msgs.msg import Point as PointMsg
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
+from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Empty, String
-from traj_utils.msg import Bspline
+from traj_utils.msg import Bspline, MultiBsplines
 
 LOG_DIR = os.environ.get("EGO_CHECK_LOG_DIR", tempfile.mkdtemp(prefix="ego-check-"))
 
@@ -206,6 +207,7 @@ class Drone:
         self.states: list[tuple[float, str]] = []
         self.bsplines: list[tuple[float, Bspline]] = []
         self.commands = 0
+        self.track: list[list[float]] = []
         node = harness.node
         ns = f"/{self.robot}/ego"
         latched = QoSProfile(
@@ -279,6 +281,7 @@ class Drone:
 
     def on_command(self, msg: PositionCommand) -> None:
         self.commands += 1
+        self.track.append([msg.position.x, msg.position.y, msg.position.z])
         self.pos = [msg.position.x, msg.position.y, msg.position.z]
         self.vel = [msg.velocity.x, msg.velocity.y, msg.velocity.z]
 
@@ -366,20 +369,55 @@ class Peer:
         self.drone_id = drone_id
         self.pub = harness.node.create_publisher(Bspline, f"{shared}/broadcast_bspline", 10)
 
-    def hover_at(self, point) -> None:
+    def hover(self, point, points: int = 6, age: float = 0.0) -> Bspline:
+        """A hover at `point` that started `age` seconds ago and lasts about
+        `points` - 2 seconds."""
         msg = Bspline()
         msg.order = 3
         msg.drone_id = self.drone_id
         msg.traj_id = 1
-        msg.start_time = self.harness.node.get_clock().now().to_msg()
+        start = self.harness.node.get_clock().now() - Duration(seconds=age)
+        msg.start_time = start.to_msg()
         interval = 1.0
-        for _ in range(6):
+        for _ in range(points):
             msg.pos_pts.append(PointMsg(x=float(point[0]), y=float(point[1]), z=float(point[2])))
         msg.knots = [(i - msg.order) * interval for i in range(len(msg.pos_pts) + msg.order + 1)]
+        return msg
+
+    def hover_at(self, point, points: int = 6) -> None:
+        self.pub.publish(self.hover(point, points))
+
+    def close(self) -> None:
+        self.harness.node.destroy_publisher(self.pub)
+
+
+class StartupChain:
+    """A drone's retained startup handshake on drone_<id>_planning/swarm_trajs."""
+
+    def __init__(self, harness: Harness, shared: str, drone_id: int) -> None:
+        self.harness = harness
+        self.drone_id = drone_id
+        latched = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.pub = harness.node.create_publisher(
+            MultiBsplines, f"{shared}/drone_{drone_id}_planning/swarm_trajs", latched
+        )
+
+    def announce(self, trajectories: list[Bspline]) -> None:
+        msg = MultiBsplines()
+        msg.drone_id_from = self.drone_id
+        msg.traj = trajectories
         self.pub.publish(msg)
 
     def close(self) -> None:
         self.harness.node.destroy_publisher(self.pub)
+
+
+def min_distance(track: list[list[float]], point) -> float:
+    return min((math.dist(p, point) for p in track), default=float("inf"))
 
 
 class Scenario:
@@ -617,6 +655,41 @@ def heartbeat(s: Scenario) -> None:
     s.check(max(gaps) <= 1.25, f"while planning fails: fsm_state gap {max(gaps):.2f} s")
 
 
+def handshake_keeps_live_peers(s: Scenario) -> None:
+    """A predecessor's retained startup handshake, older than the live
+    trajectories already received, neither replaces them nor drops other peers:
+    the drone flies around both live hovers on its path."""
+    d = s.drone(1, start=(0.0, 3.0, 1.2))
+    peer0, peer5 = Peer(s.harness, d.shared, 0), Peer(s.harness, d.shared, 5)
+    chain0 = StartupChain(s.harness, d.shared, 0)
+    try:
+        if not s.check(d.wait_ready(), "planner not up"):
+            return
+        d.odom_enabled = True
+        s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 5.0), f"state {d.state()}")
+        live0, live5 = (4.0, 3.2, 1.2), (8.0, 2.8, 1.2)
+        peer0.hover_at(live0, points=40)  # fresh, about 38 s long
+        peer5.hover_at(live5, points=40)
+        time.sleep(0.5)
+        mark = len(d.log())
+        chain0.announce([peer0.hover((1.0, 3.0, 1.2), age=30.0)])  # drone 0's startup, 30 s old
+        s.check(wait_for(lambda: "kept the live one" in d.log()[mark:], 3.0),
+                "the older handshake entry was not refused")
+        s.check(STARTUP_TIMEOUT_WARNING not in d.log(), "the handshake was not taken")
+        goal = (12.0, 3.0, 1.2)
+        d.send_goal(*goal)
+        s.check(wait_for(lambda: d.reached_state("EXEC_TRAJ"), 5.0), "never flew")
+        s.check(wait_for(lambda: d.pos[0] > 9.5, 30.0), f"did not get past both hovers: at {d.pos}")
+        near0, near5 = min_distance(d.track, live0), min_distance(d.track, live5)
+        s.note(f"closest approach: drone 0's live hover {near0:.2f} m, drone 5's {near5:.2f} m")
+        s.check(near0 >= 0.5, f"flew {near0:.2f} m from drone 0's live hover")
+        s.check(near5 >= 0.5, f"flew {near5:.2f} m from drone 5's live hover")
+    finally:
+        peer0.close()
+        peer5.close()
+        chain0.close()
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
@@ -624,6 +697,7 @@ SCENARIOS = {
     "two_drones_staggered": two_drones_staggered,
     "follower_waits_for_leader": follower_waits_for_leader,
     "lone_follower": lone_follower,
+    "handshake_keeps_live_peers": handshake_keeps_live_peers,
     "heartbeat": heartbeat,
 }
 

@@ -190,6 +190,7 @@ class Drone:
         self.odom_enabled = False
         self.states: list[tuple[float, str]] = []
         self.bsplines: list[tuple[float, Bspline]] = []
+        self.broadcasts: list[tuple[float, Bspline]] = []
         self.commands = 0
         self.track: list[list[float]] = []
         node = harness.node
@@ -200,6 +201,10 @@ class Drone:
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.subscriptions = [
+            node.create_subscription(
+                Bspline, f"{self.shared}/broadcast_bspline",
+                lambda msg: self.broadcasts.append((self.harness.now(), msg))
+                if msg.drone_id == self.drone_id else None, 10),
             node.create_subscription(String, f"{ns}/planning/fsm_state", self.on_state, latched),
             node.create_subscription(Bspline, f"{ns}/planning/bspline", self.on_bspline, 10),
             node.create_subscription(
@@ -534,11 +539,16 @@ def cancel_stops(s: Scenario) -> None:
         s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), f"state {d.state()} after cancel")
         time.sleep(0.5)
         stopped_at = list(d.pos)
+        stopped_time = s.harness.now()
         count = len(after)
         for _ in range(30):  # 3 s of fresh conflicting peer trajectories on the drone
             peer.hover_at(d.pos)
             time.sleep(0.1)
         time.sleep(1.0)
+        hovers = [msg for stamp, msg in d.broadcasts if stamp >= stopped_time]
+        s.check(len(hovers) >= 3, "cancelled drone did not refresh its hover")
+        s.check(all(is_stationary(msg) and math.dist(spline_point(msg), stopped_at) < 0.1
+                    for msg in hovers), "cancelled drone advertised a moving trajectory")
         s.check("[TRAJ_CHECK]" not in d.log()[mark:], "a peer trajectory replanned after cancel")
         s.check(len(d.bsplines_since(cancelled)) == count,
                 f"{len(d.bsplines_since(cancelled)) - count} new trajectories after cancel")
@@ -798,7 +808,7 @@ def predecessor_restart(s: Scenario) -> None:
 
 def idle_peer_learned_after_odometry(s: Scenario) -> None:
     """Drone 1 announces itself (after its startup timeout) while drone 0 has
-    no odometry, then stays idle and never broadcasts again: drone 0 still
+    no odometry, then its processes stop (preventing periodic refresh): drone 0 still
     learns drone 1's trajectory on its first odometry."""
     d0 = s.drone(0, start=(0.0, 0.0, 1.2))
     d1 = s.drone(1, start=(0.0, 3.0, 1.2), extra_parameters={"fsm/sequential_start_timeout_s": 3.0})
@@ -812,6 +822,12 @@ def idle_peer_learned_after_odometry(s: Scenario) -> None:
         d1.odom_enabled = True
         s.check(wait_for(lambda: STARTUP_TIMEOUT_WARNING in d1.log(), 8.0), "drone 1 did not announce itself")
         s.check(wait_for(lambda: any(i == 1 for _, i in heard), 2.0), "no broadcast from drone 1")
+        for process in d1.processes:
+            os.killpg(process.pid, signal.SIGINT)
+        for process in d1.processes:
+            process.wait(timeout=5.0)
+        time.sleep(0.5)  # drain the last broadcast before testing the early cache
+        count_before_odom = len([t for t, i in heard if i == 1])
         time.sleep(2.0)  # well past the 0.25 s freshness window of a live broadcast
         d0.odom_enabled = True
         learned = "Kept the trajectory of drone 1 received before odometry"
@@ -819,8 +835,38 @@ def idle_peer_learned_after_odometry(s: Scenario) -> None:
         time.sleep(1.0)
         from_1 = [t for t, i in heard if i == 1]
         s.note(f"drone 1 broadcast {len(from_1)} time(s); drone 0 learned it: {learned in d0.log()}")
-        s.check(len(from_1) == 1, f"drone 1 broadcast {len(from_1)} times, expected only its announcement")
+        s.check(len(from_1) == count_before_odom, "a fresh broadcast masked the early-cache check")
         s.check(d1.state() == "WAIT_TARGET" and not d1.bsplines, f"drone 1 not idle: {d1.state()}")
+    finally:
+        s.harness.node.destroy_subscription(sub)
+
+
+def idle_peer_stays_visible(s: Scenario) -> None:
+    """Twenty seconds after startup, an idle drone is still an optimizer obstacle."""
+    d0 = s.drone(0)
+    idle = (4.0, 0.2, 1.2)
+    d1 = s.drone(1, start=idle)
+    heard = []
+    sub = s.harness.node.create_subscription(
+        Bspline, f"{d0.shared}/broadcast_bspline",
+        lambda msg: heard.append((s.harness.now(), msg)) if msg.drone_id == 1 else None, 10)
+    try:
+        if not s.check(d0.wait_ready() and d1.wait_ready(), "planners not up"):
+            return
+        d0.odom_enabled = d1.odom_enabled = True
+        s.check(wait_for(lambda: d1.state() == "WAIT_TARGET" and heard, 5.0), "drone 1 not idle")
+        time.sleep(20.0)
+        recent = [msg for stamp, msg in heard if stamp > s.harness.now() - 3.0]
+        s.check(len(recent) >= 2, "idle drone did not refresh its hover every second")
+        s.check(all(is_stationary(msg) and math.dist(spline_point(msg), idle) < 1e-6
+                    for msg in recent), "idle announcements are not stationary at its pose")
+        d0.send_goal(10.0, 0.0, 1.2)
+        s.check(wait_for(lambda: d0.pos[0] > 6.0, 20.0), f"did not pass idle drone: {d0.pos}")
+        clearance = min_distance(d0.track, idle)
+        s.check(clearance >= 0.5, f"flew {clearance:.2f} m from idle drone (minimum 0.5 m)")
+        s.check(d1.state() == "WAIT_TARGET" and not d1.bsplines and d1.commands == 0,
+                "an idle announcement was sent to traj_server")
+        s.note(f"idle broadcasts {len(heard)}, closest approach {clearance:.2f} m")
     finally:
         s.harness.node.destroy_subscription(sub)
 
@@ -838,6 +884,7 @@ SCENARIOS = {
     "predecessor_restart": predecessor_restart,
     "idle_peer_learned_after_odometry": idle_peer_learned_after_odometry,
     "heartbeat": heartbeat,
+    "idle_peer_stays_visible": idle_peer_stays_visible,
 }
 
 

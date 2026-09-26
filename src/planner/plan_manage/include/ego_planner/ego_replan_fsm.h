@@ -104,7 +104,7 @@ namespace ego_planner
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr trigger_sub_;
     rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr cancel_sub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fsm_state_pub_;
-    rclcpp::TimerBase::SharedPtr fsm_state_timer_;
+    rclcpp::TimerBase::SharedPtr fsm_state_timer_, idle_broadcast_timer_;
 
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr replan_pub_;
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr new_pub_;
@@ -145,6 +145,7 @@ namespace ego_planner
     void publishSwarmTrajs(bool startup_pub);
     void sendSwarmTrajs(const traj_utils::msg::Bspline &bspline, bool startup_pub);
     void publishStartupChain();
+    traj_utils::msg::Bspline buildHoverAnnouncement() const;
 
   public:
     EGOReplanFSM(/* args */)

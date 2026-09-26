@@ -121,6 +121,16 @@ namespace ego_planner
     fsm_state_timer_ = node_->create_wall_timer(std::chrono::seconds(1),
                                                 std::bind(&EGOReplanFSM::publishFSMState, this));
 
+    idle_broadcast_timer_ = node_->create_wall_timer(std::chrono::seconds(1), [this]() {
+      if (!have_odom_ || planner_manager_->pp_.drone_id < 0)
+        return;
+      const auto &local = planner_manager_->local_data_;
+      const bool active = have_target_ && local.start_time_.seconds() > 0.0 &&
+          (rclcpp::Clock().now() - local.start_time_).seconds() < local.duration_;
+      if (!active)
+        broadcast_bspline_pub_->publish(buildHoverAnnouncement());
+    });
+
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
     {
       waypoint_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
@@ -589,26 +599,28 @@ namespace ego_planner
 
     if (drone_id >= 0)
     {
-      // A hover at the drone's pose; followers and peers get it, traj_server
-      // does not. It is built on its own, as EmergencyStop's spline (six equal
-      // control points, order 3, 1 s knot span), and never enters the planner's
-      // trajectory: until the first real plan nothing counts as flown, so the
-      // safety check stays off.
-      traj_utils::msg::Bspline hover;
-      hover.order = 3;
-      hover.start_time = rclcpp::Clock().now();
-      hover.drone_id = drone_id;
-      hover.traj_id = 0;
-      geometry_msgs::msg::Point pt;
-      pt.x = odom_pos_(0);
-      pt.y = odom_pos_(1);
-      pt.z = odom_pos_(2);
-      hover.pos_pts.assign(6, pt);
-      for (int i = 0; i < (int)hover.pos_pts.size() + hover.order + 1; ++i)
-        hover.knots.push_back(double(i - hover.order) * 1.0);
-      sendSwarmTrajs(hover, true);
+      sendSwarmTrajs(buildHoverAnnouncement(), true);
     }
     startup_published_ = true;
+  }
+
+  traj_utils::msg::Bspline EGOReplanFSM::buildHoverAnnouncement() const
+  {
+    // EmergencyStop's shape, built independently: it must never become a
+    // flown local trajectory or reach traj_server through planning/bspline.
+    traj_utils::msg::Bspline hover;
+    hover.order = 3;
+    hover.start_time = rclcpp::Clock().now();
+    hover.drone_id = planner_manager_->pp_.drone_id;
+    hover.traj_id = 0;
+    geometry_msgs::msg::Point pt;
+    pt.x = odom_pos_(0);
+    pt.y = odom_pos_(1);
+    pt.z = odom_pos_(2);
+    hover.pos_pts.assign(6, pt);
+    for (int i = 0; i < (int)hover.pos_pts.size() + hover.order + 1; ++i)
+      hover.knots.push_back(double(i - hover.order));
+    return hover;
   }
 
   void EGOReplanFSM::execFSMCallback()

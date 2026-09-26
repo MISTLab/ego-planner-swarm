@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <thread>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -19,10 +20,11 @@ class RollingGridMap : public ::testing::Test {
   static void SetUpTestSuite() { rclcpp::init(0, nullptr); }
   static void TearDownTestSuite() { rclcpp::shutdown(); }
 
-  GridMap::Ptr make(double map_size = 50.0, double inflation = 0.0) {
+  GridMap::Ptr make(double map_size = 50.0, double inflation = 0.0, double timeout = 1.0) {
     rclcpp::NodeOptions options;
     options.parameter_overrides({
         {"grid_map/resolution", 0.1},
+        {"grid_map/odom_depth_timeout", timeout},
         {"grid_map/window_size_x", 4.0},
         {"grid_map/window_size_y", 4.0},
         {"grid_map/window_size_z", 2.0},
@@ -154,6 +156,34 @@ TEST_F(RollingGridMap, RetainedObstacleInflatesNewCellsWithoutAnotherScan) {
   map->recenter(Eigen::Vector3d(0.2, 0.0, 0.0));
   EXPECT_EQ(map->getInflateOccupancy(obstacle), 1);
   EXPECT_EQ(map->getInflateOccupancy(neighbour), 1);
+}
+
+TEST_F(RollingGridMap, SensorTimeoutStartsAtFirstOdometryWithoutAPairedCloud) {
+  auto map = make(50.0, 0.0, 0.1);
+  auto odom = node_->create_publisher<nav_msgs::msg::Odometry>("grid_map/odom", 10);
+  auto cloud = node_->create_publisher<sensor_msgs::msg::PointCloud2>("grid_map/cloud", 10);
+  const auto spin_for = [&](int milliseconds, bool publish) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
+    while (std::chrono::steady_clock::now() < end) {
+      if (publish) {
+        odom->publish(nav_msgs::msg::Odometry());
+        sensor_msgs::msg::PointCloud2 msg;
+        msg.header.stamp = node_->now();
+        cloud->publish(msg);  // No matching origin: this is not a valid pair.
+      }
+      rclcpp::spin_some(node_);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  };
+  spin_for(200, false);
+  EXPECT_FALSE(map->getOdomDepthTimeout());
+  spin_for(500, true);
+  ASSERT_TRUE(map->odomValid());
+  EXPECT_TRUE(map->getOdomDepthTimeout());
+  map->inputCloud({}, Eigen::Vector3d::Zero());
+  EXPECT_FALSE(map->getOdomDepthTimeout());
+  spin_for(200, true);
+  EXPECT_TRUE(map->getOdomDepthTimeout());
 }
 
 TEST_F(RollingGridMap, DefaultWindowRecenterTiming) {

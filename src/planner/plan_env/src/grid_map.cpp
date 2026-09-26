@@ -158,6 +158,8 @@ void GridMap::odomCallback(const nav_msgs::msg::Odometry::SharedPtr odom)
   const auto &p = odom->pose.pose.position;
   if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
     return;
+  if (!md_.has_odom_ && !md_.has_cloud_)
+    md_.last_cloud_ = std::chrono::steady_clock::now();
   md_.has_odom_ = true;
   recenter(Eigen::Vector3d(p.x, p.y, p.z));
 }
@@ -196,7 +198,7 @@ void GridMap::inputCloud(const vector<Eigen::Vector3d> &points, const Eigen::Vec
 
 void GridMap::checkSensorTimeout()
 {
-  if (!md_.has_cloud_)
+  if (!md_.has_cloud_ && !md_.has_odom_)
     return;
   const double gap =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - md_.last_cloud_).count();

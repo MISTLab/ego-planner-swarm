@@ -73,6 +73,11 @@ namespace ego_planner
     /* SwarmDeck: a goal received before odometry, planned from the first odometry */
     bool have_pending_goal_{false};
     Eigen::Vector3d pending_goal_;
+    /* SwarmDeck: the startup handshake on drone_<id>_planning/swarm_trajs */
+    bool startup_published_{false};
+    double sequential_start_timeout_;
+    rclcpp::Time first_odom_time_;
+    std::shared_ptr<const traj_utils::msg::MultiBsplines> pending_swarm_trajs_;
 
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
     Eigen::Quaterniond odom_orient_;
@@ -133,6 +138,7 @@ namespace ego_planner
 
     bool checkCollision();
     void publishSwarmTrajs(bool startup_pub);
+    void publishStartupChain();
 
   public:
     EGOReplanFSM(/* args */)

@@ -504,10 +504,96 @@ def cancel_stops(s: Scenario) -> None:
         peer.close()
 
 
+STARTUP_TIMEOUT_WARNING = "starting without it"
+
+
+def two_drones_staggered(s: Scenario) -> None:
+    """Drone 1 gets its goal before its odometry, drone 0 gets its goal in
+    WAIT_TARGET after drone 1's odometry: both fly, with no startup timeout."""
+    d0 = s.drone(0, start=(0.0, 0.0, 1.2))
+    d1 = s.drone(1, start=(0.0, 3.0, 1.2))
+    if not s.check(d0.wait_ready() and d1.wait_ready(), "planners not up"):
+        return
+    goal1, goal0 = (10.0, 3.0, 1.5), (10.0, 0.0, 1.5)
+    d1.send_goal(*goal1)
+    time.sleep(1.0)
+    d0.odom_enabled = True
+    s.check(wait_for(lambda: d0.state() == "WAIT_TARGET", 5.0), f"drone 0: {d0.state()}")
+    time.sleep(1.0)
+    odom1 = s.harness.now()
+    d1.odom_enabled = True
+    time.sleep(1.0)
+    goal0_sent = s.harness.now()
+    s.check(d0.state() == "WAIT_TARGET", f"drone 0 in {d0.state()} before its goal")
+    d0.send_goal(*goal0)
+    exec1 = wait_for(lambda: d1.reached_state("EXEC_TRAJ", odom1), 8.0)
+    exec0 = wait_for(lambda: d0.reached_state("EXEC_TRAJ", goal0_sent), 8.0)
+    s.check(exec1, "drone 1 never reached EXEC_TRAJ")
+    s.check(exec0, "drone 0 never reached EXEC_TRAJ")
+    if exec1:
+        s.note(f"drone 1 EXEC_TRAJ {d1.reached_state('EXEC_TRAJ', odom1) - odom1:.2f} s after its odometry")
+    if exec0:
+        s.note(f"drone 0 EXEC_TRAJ {d0.reached_state('EXEC_TRAJ', goal0_sent) - goal0_sent:.2f} s after its goal")
+    s.check(wait_for(lambda: d0.near(goal0, 0.3) and d1.near(goal1, 0.3), 20.0),
+            f"goals not reached: drone 0 at {d0.pos}, drone 1 at {d1.pos}")
+    s.check(STARTUP_TIMEOUT_WARNING not in d1.log(), "drone 1 timed out waiting for drone 0")
+
+
+def follower_waits_for_leader(s: Scenario) -> None:
+    """Drone 1 has odometry and a goal before drone 0 is up: it waits in
+    SEQUENTIAL_START and flies as soon as drone 0 has odometry."""
+    d0 = s.drone(0, start=(0.0, 0.0, 1.2))
+    d1 = s.drone(1, start=(0.0, 3.0, 1.2))
+    if not s.check(d0.wait_ready() and d1.wait_ready(), "planners not up"):
+        return
+    goal1 = (10.0, 3.0, 1.5)
+    d1.odom_enabled = True
+    s.check(wait_for(lambda: d1.state() == "WAIT_TARGET", 5.0), f"drone 1: {d1.state()}")
+    d1.send_goal(*goal1)
+    s.check(wait_for(lambda: d1.state() == "SEQUENTIAL_START", 2.0), f"drone 1 in {d1.state()}")
+    time.sleep(3.0)
+    s.check(d1.state() == "SEQUENTIAL_START", f"drone 1 left SEQUENTIAL_START for {d1.state()} alone")
+    s.check(not d1.bsplines, "drone 1 planned before drone 0 was up")
+    odom0 = s.harness.now()
+    d0.odom_enabled = True
+    s.check(wait_for(lambda: d1.reached_state("EXEC_TRAJ", odom0), 3.0),
+            "drone 1 did not fly within 3 s of drone 0's odometry")
+    if d1.reached_state("EXEC_TRAJ", odom0):
+        s.note(f"drone 1 EXEC_TRAJ {d1.reached_state('EXEC_TRAJ', odom0) - odom0:.2f} s after drone 0's odometry")
+    s.check(wait_for(lambda: d1.near(goal1, 0.3), 20.0), f"drone 1 at {d1.pos}, goal {goal1}")
+    s.check(STARTUP_TIMEOUT_WARNING not in d1.log(), "drone 1 timed out waiting for drone 0")
+    d0.send_goal(10.0, 0.0, 1.5)
+    s.check(wait_for(lambda: d0.reached_state("EXEC_TRAJ"), 5.0), "drone 0 never flew")
+
+
+def lone_follower(s: Scenario) -> None:
+    """Drone 1 with no drone 0 running starts after fsm/sequential_start_timeout_s."""
+    d1 = s.drone(1, start=(0.0, 3.0, 1.2))
+    if not s.check(d1.wait_ready(), "planner not up"):
+        return
+    odom1 = s.harness.now()
+    d1.odom_enabled = True
+    time.sleep(1.0)
+    goal1 = (10.0, 3.0, 1.5)
+    d1.send_goal(*goal1)
+    s.check(wait_for(lambda: d1.state() == "SEQUENTIAL_START", 2.0), f"drone 1 in {d1.state()}")
+    s.check(wait_for(lambda: d1.reached_state("EXEC_TRAJ"), 15.0), "drone 1 never flew")
+    started = d1.reached_state("EXEC_TRAJ")
+    if started:
+        waited = started - odom1
+        s.note(f"drone 1 EXEC_TRAJ {waited:.2f} s after its odometry (timeout 10 s)")
+        s.check(9.5 <= waited <= 12.0, f"drone 1 flew {waited:.2f} s after odometry, expected ~10 s")
+    s.check(STARTUP_TIMEOUT_WARNING in d1.log(), "no startup-timeout warning")
+    s.check(wait_for(lambda: d1.near(goal1, 0.3), 20.0), f"drone 1 at {d1.pos}, goal {goal1}")
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
     "cancel_stops": cancel_stops,
+    "two_drones_staggered": two_drones_staggered,
+    "follower_waits_for_leader": follower_waits_for_leader,
+    "lone_follower": lone_follower,
 }
 
 

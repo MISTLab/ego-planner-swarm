@@ -23,6 +23,7 @@ namespace ego_planner
     node_->declare_parameter("fsm/emergency_time", 1.0);
     node_->declare_parameter("fsm/realworld_experiment", false);
     node_->declare_parameter("fsm/fail_safe", true);
+    node_->declare_parameter("fsm/sequential_start_timeout_s", 10.0);
 
     node_->get_parameter("fsm/flight_type", target_type_);
     node_->get_parameter("fsm/thresh_replan_time", replan_thresh_);
@@ -33,6 +34,7 @@ namespace ego_planner
     node_->get_parameter("fsm/realworld_experiment", flag_realworld_experiment_);
     node_->get_parameter("fsm/fail_safe", enable_fail_safe_);
     configured_fail_safe_ = enable_fail_safe_;
+    node_->get_parameter("fsm/sequential_start_timeout_s", sequential_start_timeout_);
 
     have_trigger_ = !flag_realworld_experiment_;
 
@@ -81,7 +83,7 @@ namespace ego_planner
       string sub_topic_name = string("drone_") + std::to_string(planner_manager_->pp_.drone_id - 1) + string("_planning/swarm_trajs");
       swarm_trajs_sub_ = node_->create_subscription<traj_utils::msg::MultiBsplines>(
           sub_topic_name,
-          10,
+          rclcpp::QoS(1).transient_local(), // SwarmDeck: a late follower still gets it
           [this](const std::shared_ptr<const traj_utils::msg::MultiBsplines> &msg)
           {
             this->swarmTrajsCallback(msg);
@@ -100,7 +102,7 @@ namespace ego_planner
       pub_topic_name = string("drone_") + std::to_string(planner_manager_->pp_.drone_id) + string("_planning/swarm_trajs");
     }
     
-    swarm_trajs_pub_ = node_->create_publisher<traj_utils::msg::MultiBsplines>(pub_topic_name, 10);
+    swarm_trajs_pub_ = node_->create_publisher<traj_utils::msg::MultiBsplines>(pub_topic_name, rclcpp::QoS(1).transient_local());
 
     broadcast_bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/broadcast_bspline_from_planner", 10);
     broadcast_bspline_sub_ = node_->create_subscription<traj_utils::msg::Bspline>(
@@ -221,6 +223,8 @@ namespace ego_planner
       {
         // WAIT_TARGET takes the target once odometry has arrived.
       }
+      else if (!startup_published_)
+        changeFSMExecState(SEQUENTIAL_START, "TRIG");
       else if (exec_state_ == EXEC_TRAJ)
         changeFSMExecState(REPLAN_TRAJ, "TRIG");
       else
@@ -280,7 +284,16 @@ namespace ego_planner
     odom_orient_.y() = msg->pose.pose.orientation.y;
     odom_orient_.z() = msg->pose.pose.orientation.z;
 
+    if (!have_odom_)
+      first_odom_time_ = rclcpp::Clock().now();
     have_odom_ = true;
+
+    if (pending_swarm_trajs_)
+    {
+      auto startup = pending_swarm_trajs_;
+      pending_swarm_trajs_.reset();
+      swarmTrajsCallback(startup);
+    }
 
     if (have_pending_goal_)
     {
@@ -378,25 +391,22 @@ namespace ego_planner
 
   void EGOReplanFSM::swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines> &msg)
   {
+    if (startup_published_) // SwarmDeck: the chain is a startup handshake only
+      return;
 
     multi_bspline_msgs_buf_.traj.clear();
     multi_bspline_msgs_buf_ = *msg;
 
     if (!have_odom_)
     {
-      RCLCPP_ERROR(node_->get_logger(), "swarmTrajsCallback(): no odom!, return.");
+      RCLCPP_INFO(node_->get_logger(), "swarmTrajsCallback(): no odom yet, kept for the first odometry.");
+      pending_swarm_trajs_ = msg;
       return;
     }
 
     if ((int)msg->traj.size() != msg->drone_id_from + 1) // drone_id must start from 0
     {
       RCLCPP_ERROR(node_->get_logger(), "Wrong trajectory size!msg->traj.size()=%d, msg->drone_id_from+1=%d", (int)msg->traj.size(), msg->drone_id_from + 1);
-      return;
-    }
-
-    if (msg->traj[0].order != 3) // only support B-spline order equals 3.
-    {
-      RCLCPP_ERROR(node_->get_logger(), "Only support B-spline order equals 3.");
       return;
     }
 
@@ -407,6 +417,12 @@ namespace ego_planner
     // 处理每条路径
     for (size_t i = 0; i < msg->traj.size(); i++)
     {
+      // only support B-spline order equals 3; an absent drone leaves an empty entry.
+      if (msg->traj[i].order != 3 || msg->traj[i].pos_pts.size() < 3 || msg->traj[i].knots.size() < 2)
+      {
+        planner_manager_->swarm_trajs_buf_[i].drone_id = -1;
+        continue;
+      }
 
       Eigen::Vector3d cp0(msg->traj[i].pos_pts[0].x, msg->traj[i].pos_pts[0].y, msg->traj[i].pos_pts[0].z);
       Eigen::Vector3d cp1(msg->traj[i].pos_pts[1].x, msg->traj[i].pos_pts[1].y, msg->traj[i].pos_pts[1].z);
@@ -509,6 +525,32 @@ namespace ego_planner
       changeFSMExecState(WAIT_TARGET, "CANCEL");
   }
 
+  void EGOReplanFSM::publishStartupChain()
+  {
+    // SwarmDeck: each drone tells its follower it is up as soon as it has
+    // odometry and has heard from its predecessor (or waited
+    // fsm/sequential_start_timeout_s for it), whether or not it has a goal.
+    if (startup_published_ || !have_odom_)
+      return;
+
+    const int drone_id = planner_manager_->pp_.drone_id;
+    if (drone_id >= 1 && !have_recv_pre_agent_)
+    {
+      const double waited = (rclcpp::Clock().now() - first_odom_time_).seconds();
+      if (waited < sequential_start_timeout_)
+        return;
+      RCLCPP_WARN(node_->get_logger(), "No startup trajectory from drone %d after %.1f s: starting without it.", drone_id - 1, waited);
+    }
+
+    if (drone_id >= 0)
+    {
+      // A hover at the drone's pose; followers and peers get it, traj_server does not.
+      planner_manager_->EmergencyStop(odom_pos_);
+      publishSwarmTrajs(true);
+    }
+    startup_published_ = true;
+  }
+
   void EGOReplanFSM::execFSMCallback()
   {
     exec_timer_->cancel(); // To avoid blockage
@@ -525,6 +567,8 @@ namespace ego_planner
         cout << "wait for goal or trigger." << endl;
       fsm_num = 0;
     }
+
+    publishStartupChain();
 
     switch (exec_state_)
     {
@@ -551,29 +595,10 @@ namespace ego_planner
 
     case SEQUENTIAL_START: // for swarm
     {
-      if (planner_manager_->pp_.drone_id <= 0 || (planner_manager_->pp_.drone_id >= 1 && have_recv_pre_agent_))
-      {
-        if (have_odom_ && have_target_ && have_trigger_)
-        {
-          bool success = planFromGlobalTraj(10); // zx-todo
-          if (success)
-          {
-            changeFSMExecState(EXEC_TRAJ, "FSM");
-
-            publishSwarmTrajs(true);
-          }
-          else
-          {
-            RCLCPP_ERROR(node_->get_logger(), "Failed to generate the first trajectory!!!");
-            changeFSMExecState(SEQUENTIAL_START, "FSM");
-          }
-        }
-        else
-        {
-          RCLCPP_ERROR(node_->get_logger(), "No odom or no target! have_odom_=%d, have_target_=%d", have_odom_, have_target_);
-        }
-      }
-
+      // SwarmDeck: wait for the startup handshake (publishStartupChain), then
+      // plan the first trajectory as any other.
+      if (startup_published_)
+        changeFSMExecState(GEN_NEW_TRAJ, "FSM");
       break;
     }
 
@@ -761,7 +786,7 @@ namespace ego_planner
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
     
-    if (!have_target_ || exec_state_ == WAIT_TARGET || info->start_time_.seconds() < 1e-5)
+    if (!have_target_ || exec_state_ == INIT || exec_state_ == WAIT_TARGET || exec_state_ == SEQUENTIAL_START || info->start_time_.seconds() < 1e-5)
       return;
 
     /* ---------- check lost of depth ---------- */
@@ -922,21 +947,10 @@ namespace ego_planner
 
     if (startup_pub)
     {
-      multi_bspline_msgs_buf_.drone_id_from = planner_manager_->pp_.drone_id; // zx-todo
-      if ((int)multi_bspline_msgs_buf_.traj.size() == planner_manager_->pp_.drone_id + 1)
-      {
-        multi_bspline_msgs_buf_.traj.back() = bspline;
-      }
-      else if ((int)multi_bspline_msgs_buf_.traj.size() == planner_manager_->pp_.drone_id)
-      {
-        multi_bspline_msgs_buf_.traj.push_back(bspline);
-      }
-      else
-      {
-        RCLCPP_ERROR(node_->get_logger(), "Wrong traj nums and drone_id pair!!! traj.size()=%d, drone_id=%d", (int)multi_bspline_msgs_buf_.traj.size(), planner_manager_->pp_.drone_id);
-        // return plan_and_refine_success;
-      }
-      // swarm_trajs_pub_.publish(multi_bspline_msgs_buf_);
+      // SwarmDeck: an absent predecessor leaves empty entries, which followers skip.
+      multi_bspline_msgs_buf_.drone_id_from = planner_manager_->pp_.drone_id;
+      multi_bspline_msgs_buf_.traj.resize(planner_manager_->pp_.drone_id);
+      multi_bspline_msgs_buf_.traj.push_back(bspline);
       swarm_trajs_pub_->publish(multi_bspline_msgs_buf_);
     }
 

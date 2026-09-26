@@ -12,7 +12,9 @@ It then asserts on the FSM states, B-splines and commands the planners publish.
 
 Run it in an isolated container (--network none, a private ROS_DOMAIN_ID).
 Every scenario uses its own topic prefix, so scenarios cannot hear each other.
-Exit status 0 when every scenario passes.
+Exit status 0 when every scenario passes. EGO_CHECK_PLANNER_PREFIX runs the
+planner under a wrapper, e.g. "valgrind --track-origins=yes" (ros2 run --prefix);
+EGO_CHECK_READY_TIMEOUT (s, default 20) then gives the slower planner time to start.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from std_msgs.msg import Empty, String
 from traj_utils.msg import Bspline, MultiBsplines
 
 LOG_DIR = os.environ.get("EGO_CHECK_LOG_DIR", tempfile.mkdtemp(prefix="ego-check-"))
+READY_TIMEOUT = float(os.environ.get("EGO_CHECK_READY_TIMEOUT", "20"))
 
 
 def planner_parameters(robot: str, drone_id: int) -> dict:
@@ -166,7 +169,7 @@ class Harness:
         for process in self.processes:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGINT)
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + max(5.0, READY_TIMEOUT / 2)
         for process in self.processes:
             try:
                 process.wait(timeout=max(0.1, deadline - time.monotonic()))
@@ -265,7 +268,9 @@ class Drone:
         if self.drone_id >= 1:
             previous = swarm.format(self.drone_id - 1)
             remaps[previous] = f"{self.shared}/{previous}"
-        cmd = ["ros2", "run", "ego_planner", "ego_planner_node", "--ros-args",
+        prefix = os.environ.get("EGO_CHECK_PLANNER_PREFIX")
+        cmd = ["ros2", "run"] + (["--prefix", prefix] if prefix else [])
+        cmd += ["ego_planner", "ego_planner_node", "--ros-args",
                "-r", "__node:=ego_planner", "-r", f"__ns:={ns}"]
         for key, value in remaps.items():
             cmd += ["-r", f"{key}:={value}"]
@@ -327,7 +332,7 @@ class Drone:
         self.cloud_pub.publish(cloud)
 
     # -- commands and queries
-    def wait_ready(self, timeout: float = 20.0) -> bool:
+    def wait_ready(self, timeout: float = READY_TIMEOUT) -> bool:
         """The planner is up and subscribed to its goal and cancel topics."""
         return wait_for(
             lambda: self.states

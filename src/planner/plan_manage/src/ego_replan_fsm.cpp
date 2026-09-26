@@ -312,6 +312,11 @@ namespace ego_planner
     if ((int)id == planner_manager_->pp_.drone_id)
       return;
 
+    // SwarmDeck: the distance test below needs our position; before the first
+    // odometry it is unset (peers re-broadcast with every replan).
+    if (!have_odom_)
+      return;
+
     // if (abs((ros::Time::now() - msg->start_time).toSec()) > 0.25)
     rclcpp::Clock clock(RCL_SYSTEM_TIME);  // 确保使用当前节点的时间源
     auto msg_time = rclcpp::Time(msg->start_time, clock.get_clock_type());

@@ -337,18 +337,21 @@ void GridMap::inflateBox(const Eigen::Vector3i &clear_min, const Eigen::Vector3i
         const Eigen::Vector3i voxel(x, y, z);
         const Eigen::Vector3i lo = clear_min.cwiseMax(voxel - margin);
         const Eigen::Vector3i hi = clear_max.cwiseMin(voxel + margin);
-        const std::size_t z_size = window_.size()(2);
-        const std::size_t count = hi(2) - lo(2) + 1;
+        const int z_size = window_.size()(2);
+        const int count = hi(2) - lo(2) + 1;
+        if (count <= 0)
+          continue;  // an empty clear box: nothing to write
         for (int nx = lo(0); nx <= hi(0); ++nx)
           for (int ny = lo(1); ny <= hi(1); ++ny)
           {
             // z is contiguous except at its modulo seam: at most two fills.
             const std::size_t address = window_.address(Eigen::Vector3i(nx, ny, lo(2)));
-            const std::size_t first = std::min(count, z_size - address % z_size);
+            const int offset = int(address % z_size);
+            const int first = std::min(count, z_size - offset);
             auto begin = md_.occupancy_buffer_inflate_.begin();
             std::fill_n(begin + address, first, 1);
             if (first < count)
-              std::fill_n(begin + address - address % z_size, count - first, 1);
+              std::fill_n(begin + (address - offset), count - first, 1);
           }
       }
 

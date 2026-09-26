@@ -332,15 +332,24 @@ void GridMap::inflateBox(const Eigen::Vector3i &clear_min, const Eigen::Vector3i
       {
         if (md_.occupancy_buffer_[window_.address(Eigen::Vector3i(x, y, z))] <= mp_.min_occupancy_log_)
           continue;
-        for (int dx = -step; dx <= step; ++dx)
-          for (int dy = -step; dy <= step; ++dy)
-            for (int dz = -step; dz <= step; ++dz)
-            {
-              const Eigen::Vector3i neighbour(x + dx, y + dy, z + dz);
-              if ((neighbour.array() >= clear_min.array()).all() &&
-                  (neighbour.array() <= clear_max.array()).all())
-                md_.occupancy_buffer_inflate_[window_.address(neighbour)] = 1;
-            }
+        // Iterate only the clear-box intersection. In particular, a dense
+        // floor near a z boundary must not test all (2r+1)^3 neighbours.
+        const Eigen::Vector3i voxel(x, y, z);
+        const Eigen::Vector3i lo = clear_min.cwiseMax(voxel - margin);
+        const Eigen::Vector3i hi = clear_max.cwiseMin(voxel + margin);
+        const std::size_t z_size = window_.size()(2);
+        const std::size_t count = hi(2) - lo(2) + 1;
+        for (int nx = lo(0); nx <= hi(0); ++nx)
+          for (int ny = lo(1); ny <= hi(1); ++ny)
+          {
+            // z is contiguous except at its modulo seam: at most two fills.
+            const std::size_t address = window_.address(Eigen::Vector3i(nx, ny, lo(2)));
+            const std::size_t first = std::min(count, z_size - address % z_size);
+            auto begin = md_.occupancy_buffer_inflate_.begin();
+            std::fill_n(begin + address, first, 1);
+            if (first < count)
+              std::fill_n(begin + address - address % z_size, count - first, 1);
+          }
       }
 
   // Optional ceiling to limit flight height (odometry-frame z; off below -0.5).

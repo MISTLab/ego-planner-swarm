@@ -186,30 +186,52 @@ TEST_F(RollingGridMap, SensorTimeoutStartsAtFirstOdometryWithoutAPairedCloud) {
   EXPECT_TRUE(map->getOdomDepthTimeout());
 }
 
-TEST_F(RollingGridMap, DefaultWindowRecenterTiming) {
+void recenterTiming(const std::string &name, const Eigen::Vector3d &shift, int wall_axis) {
   rclcpp::NodeOptions options;
-  options.parameter_overrides({{"grid_map/obstacles_inflation", 0.25}});
-  auto node = std::make_shared<rclcpp::Node>("grid_map_recenter_timing", options);
+  // Long rays populate the entire dense boundary plane, not just a lidar disc.
+  options.parameter_overrides({{"grid_map/obstacles_inflation", 0.25},
+                               {"grid_map/max_ray_length", 40.0}, {"grid_map/p_hit", 0.9}});
+  auto node = std::make_shared<rclcpp::Node>("grid_map_timing_" + name, options);
   GridMap map;
   map.initMap(node);
-  // A dense boundary wall exercises inflation as well as the empty scan cost.
   std::vector<Eigen::Vector3d> wall;
-  for (double y = -11.95; y < 12.0; y += 0.1)
-    for (double z = -3.95; z < 4.0; z += 0.1)
-      wall.emplace_back(11.95, y, z);
-  for (int i = 0; i < 6; ++i) map.inputCloud(wall, Eigen::Vector3d(10.0, 0.0, 0.0));
+  const int axis_a = wall_axis == 0 ? 1 : 0;
+  const int axis_b = wall_axis == 0 ? 2 : 1;
+  const Eigen::Vector3i size(240, 240, 80);
+  const Eigen::Vector3d low(-12.0, -12.0, -4.0);
+  for (int a = 0; a < size(axis_a); ++a)
+    for (int b = 0; b < size(axis_b); ++b) {
+      Eigen::Vector3d point = low + Eigen::Vector3d::Constant(0.05);
+      point(wall_axis) += (size(wall_axis) - 1) * 0.1;
+      point(axis_a) += a * 0.1;
+      point(axis_b) += b * 0.1;
+      wall.push_back(point);
+    }
+  for (int i = 0; i < 3; ++i) map.inputCloud(wall, Eigen::Vector3d::Zero());
   double total_ms = 0.0, max_ms = 0.0;
   for (int i = 0; i < 100; ++i) {
     const auto start = std::chrono::steady_clock::now();
-    map.recenter(Eigen::Vector3d(i % 2 ? 0.0 : 0.1, 0.0, 0.0));
+    map.recenter(i % 2 ? Eigen::Vector3d::Zero().eval() : shift);
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - start).count();
     total_ms += ms;
     max_ms = std::max(max_ms, ms);
   }
-  std::cout << "Default window one-cell recenter: mean " << total_ms / 100.0
+  std::cout << "Default window " << name << " recenter: mean " << total_ms / 100.0
             << " ms, max " << max_ms << " ms (100 shifts)" << std::endl;
   EXPECT_EQ(map.bufferCells(), 240u * 240u * 80u);
+}
+
+TEST_F(RollingGridMap, DefaultWindowRecenterTiming) {
+  recenterTiming("x", Eigen::Vector3d(0.1, 0.0, 0.0), 0);
+}
+
+TEST_F(RollingGridMap, DefaultWindowZRecenterTiming) {
+  recenterTiming("z", Eigen::Vector3d(0.0, 0.0, 0.1), 2);
+}
+
+TEST_F(RollingGridMap, DefaultWindowDiagonalRecenterTiming) {
+  recenterTiming("diagonal", Eigen::Vector3d(0.1, 0.1, 0.1), 2);
 }
 
 }  // namespace

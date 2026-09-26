@@ -31,7 +31,7 @@ import time
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Point as PointMsg
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
 from rclpy.duration import Duration
@@ -61,37 +61,18 @@ def planner_parameters(robot: str, drone_id: int) -> dict:
         "fsm/waypoint0_y": 0.0,
         "fsm/waypoint0_z": 1.0,
         "grid_map/resolution": 0.1,
-        "grid_map/map_size_x": 50.0,
-        "grid_map/map_size_y": 50.0,
-        "grid_map/map_size_z": 6.0,
-        "grid_map/local_update_range_x": 5.5,
-        "grid_map/local_update_range_y": 5.5,
-        "grid_map/local_update_range_z": 4.5,
+        "grid_map/window_size_x": 24.0,
+        "grid_map/window_size_y": 24.0,
+        "grid_map/window_size_z": 8.0,
         "grid_map/obstacles_inflation": 0.25,
-        "grid_map/local_map_margin": 10,
-        "grid_map/ground_height": -1.0,
-        "grid_map/cx": 321.04638671875,
-        "grid_map/cy": 243.44969177246094,
-        "grid_map/fx": 387.229248046875,
-        "grid_map/fy": 387.229248046875,
-        "grid_map/use_depth_filter": True,
-        "grid_map/depth_filter_tolerance": 0.15,
-        "grid_map/depth_filter_maxdist": 5.0,
-        "grid_map/depth_filter_mindist": 0.2,
-        "grid_map/depth_filter_margin": 2,
-        "grid_map/k_depth_scaling_factor": 1000.0,
-        "grid_map/skip_pixel": 2,
         "grid_map/p_hit": 0.65,
         "grid_map/p_miss": 0.35,
         "grid_map/p_min": 0.12,
         "grid_map/p_max": 0.90,
         "grid_map/p_occ": 0.80,
-        "grid_map/min_ray_length": 0.1,
         "grid_map/max_ray_length": 8.0,
         "grid_map/virtual_ceil_height": -1.0,
         "grid_map/visualization_truncate_height": 100.0,
-        "grid_map/show_occ_time": False,
-        "grid_map/pose_type": 2,
         "grid_map/frame_id": f"{robot}/odom",
         "grid_map/odom_depth_timeout": 3.0,
         "manager/max_vel": 2.0,
@@ -228,6 +209,7 @@ class Drone:
         self.goal_pub = node.create_publisher(PoseStamped, f"{ns}/goal", 10)
         self.cancel_pub = node.create_publisher(Empty, f"{ns}/cancel", 10)
         self.odom_pub = node.create_publisher(Odometry, f"/{self.robot}/odom", 10)
+        self.origin_pub = node.create_publisher(PointStamped, f"/{self.robot}/scan/origin_odom", 10)
         self.cloud_pub = node.create_publisher(PointCloud2, f"/{self.robot}/scan/points_odom", 10)
         self.timers = [
             node.create_timer(0.01, self.publish_odom),
@@ -261,6 +243,7 @@ class Drone:
             "odom_world": f"/{self.robot}/odom",
             "grid_map/odom": f"/{self.robot}/odom",
             "grid_map/cloud": f"/{self.robot}/scan/points_odom",
+            "grid_map/cloud_origin": f"/{self.robot}/scan/origin_odom",
             "planning/broadcast_bspline_from_planner": f"{self.shared}/broadcast_bspline",
             "planning/broadcast_bspline_to_planner": f"{self.shared}/broadcast_bspline",
             swarm.format(self.drone_id): f"{self.shared}/{swarm.format(self.drone_id)}",
@@ -290,7 +273,7 @@ class Drone:
             node.destroy_timer(timer)
         for subscription in self.subscriptions:
             node.destroy_subscription(subscription)
-        for publisher in (self.goal_pub, self.cancel_pub, self.odom_pub, self.cloud_pub):
+        for publisher in (self.goal_pub, self.cancel_pub, self.odom_pub, self.cloud_pub, self.origin_pub):
             node.destroy_publisher(publisher)
 
     # -- callbacks
@@ -330,6 +313,10 @@ class Drone:
         cloud.is_dense = True
         cloud.data = CLOUD_POINTS.tobytes()
         self.cloud_pub.publish(cloud)
+        origin = PointStamped()
+        origin.header = cloud.header
+        origin.point.x, origin.point.y, origin.point.z = self.pos
+        self.origin_pub.publish(origin)
 
     # -- commands and queries
     def wait_ready(self, timeout: float = READY_TIMEOUT) -> bool:
@@ -653,7 +640,7 @@ def state_gaps(d: Drone, start: float, end: float) -> list[float]:
 
 def heartbeat(s: Scenario) -> None:
     """fsm_state comes at least once a second, idle and while planning fails."""
-    d = s.drone(0)
+    d = s.drone(0, extra_parameters={"grid_map/window_size_x": 2.0, "grid_map/window_size_z": 2.0})
     if not s.check(d.wait_ready(), "planner not up"):
         return
     d.odom_enabled = True
@@ -665,7 +652,7 @@ def heartbeat(s: Scenario) -> None:
     s.check(max(gaps) <= 1.25, f"idle: fsm_state gap {max(gaps):.2f} s")
 
     mark = len(d.log())
-    d.send_goal(3.0, 0.0, -4.0)  # below the map: planning fails once the drone nears the floor
+    d.send_goal(3.0, 0.0, -4.0)  # beyond the small rolling window: the first plan fails
     start = s.harness.now()
     time.sleep(8.0)
     end = s.harness.now()
@@ -712,10 +699,10 @@ def handshake_keeps_live_peers(s: Scenario) -> None:
 
 
 def blocked_start(s: Scenario) -> None:
-    """A drone whose start is outside the map cannot plan its first trajectory:
+    """A drone with a goal beyond a small window cannot plan its first trajectory:
     it reports the failure and never flies, and its startup handshake is not
     taken for a flown trajectory (no safety check, no emergency stop)."""
-    d = s.drone(0, start=(0.0, 0.0, 5.5))  # the map spans z -1 to 5
+    d = s.drone(0, extra_parameters={"grid_map/window_size_x": 2.0, "grid_map/window_size_z": 2.0})
     if not s.check(d.wait_ready(), "planner not up"):
         return
     d.odom_enabled = True

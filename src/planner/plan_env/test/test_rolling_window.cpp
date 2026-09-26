@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <set>
+#include <tuple>
 
 #include "plan_env/rolling_window.h"
 
@@ -60,6 +61,39 @@ TEST(RollingWindow, BoundsAndClampAreTheWindow) {
   EXPECT_TRUE(w.maxBound().isApprox(Eigen::Vector3d(12.0, 12.0, 4.0)));
   EXPECT_EQ(w.clamp(Eigen::Vector3i(500, -500, 0)), Eigen::Vector3i(119, -120, 0));
   EXPECT_EQ(w.cells(), 240u * 240u * 80u);
+}
+
+TEST(RollingWindow, NegativeShiftReusesTheLeavingStorage) {
+  RollingWindow w(1.0, Eigen::Vector3i(4, 4, 4));
+  w.recenter(Eigen::Vector3d(0.5, 0.5, 0.5));
+  const auto leaving = addresses(w, 0, 1);
+  const auto entered = w.recenter(Eigen::Vector3d(-1.5, 0.5, 0.5));
+  ASSERT_EQ(entered.size(), 1u);
+  EXPECT_EQ(entered[0].first, Eigen::Vector3i(-4, -2, -2));
+  EXPECT_EQ(entered[0].second, Eigen::Vector3i(-3, 1, 1));
+  EXPECT_EQ(addresses(w, -4, -3), leaving);
+}
+
+TEST(RollingWindow, DiagonalShiftEntersExactlyTheDifferenceOfTheWindows) {
+  RollingWindow w(1.0, Eigen::Vector3i(4, 5, 3));
+  w.recenter(Eigen::Vector3d(0.5, 0.5, 0.5));
+  const RollingWindow old = w;
+  const auto entered = w.recenter(Eigen::Vector3d(-0.5, 2.5, -0.5));
+  ASSERT_EQ(entered.size(), 3u);
+  using Index = std::tuple<int, int, int>;
+  std::set<Index> actual, expected;
+  for (const auto &box : entered)
+    for (int x = box.first(0); x <= box.second(0); ++x)
+      for (int y = box.first(1); y <= box.second(1); ++y)
+        for (int z = box.first(2); z <= box.second(2); ++z)
+          actual.emplace(x, y, z);
+  for (int x = w.minIndex()(0); x <= w.maxIndex()(0); ++x)
+    for (int y = w.minIndex()(1); y <= w.maxIndex()(1); ++y)
+      for (int z = w.minIndex()(2); z <= w.maxIndex()(2); ++z)
+        if (!old.contains(Eigen::Vector3i(x, y, z)))
+          expected.emplace(x, y, z);
+  EXPECT_EQ(actual, expected);
+  EXPECT_EQ(addresses(w, w.minIndex()(0), w.maxIndex()(0)).size(), w.cells());
 }
 
 }  // namespace

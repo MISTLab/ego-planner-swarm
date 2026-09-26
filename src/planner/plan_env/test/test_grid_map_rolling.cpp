@@ -49,6 +49,29 @@ class RollingGridMap : public ::testing::Test {
     for (int i = 0; i < 3; ++i) map.inputCloud({point}, origin);
   }
 
+  void checkInflationAfterShift(const Eigen::Vector3d &shift) {
+    auto map = make(50.0, 0.2);
+    const std::vector<Eigen::Vector3d> obstacles = {
+        {1.85, 1.85, 0.85}, {-1.85, -1.85, -0.85},
+        {0.05, 0.05, 0.85}, {0.05, 0.05, -0.85}};
+    for (const auto &point : obstacles) observe(*map, point);
+    for (const auto &point : obstacles) ASSERT_EQ(map->getOccupancy(point), 1);
+    map->recenter(shift);
+    const Eigen::Vector3d low = map->windowMin();
+    const Eigen::Vector3d high = map->windowMax();
+    for (int x = 0; x < 40; ++x)
+      for (int y = 0; y < 40; ++y)
+        for (int z = 0; z < 20; ++z) {
+          const Eigen::Vector3d point = low + Eigen::Vector3d(x + 0.5, y + 0.5, z + 0.5) * 0.1;
+          bool expected = false;
+          for (const auto &obstacle : obstacles)
+            if ((obstacle.array() >= low.array()).all() && (obstacle.array() < high.array()).all())
+              expected |= (obstacle - point).cwiseAbs().maxCoeff() < 0.200001;
+          ASSERT_EQ(map->getInflateOccupancy(point), expected ? 1 : 0)
+              << "point " << point.transpose() << ", shift " << shift.transpose();
+        }
+  }
+
   rclcpp::Node::SharedPtr node_;
   static int next_node_;
 };
@@ -186,6 +209,20 @@ TEST_F(RollingGridMap, SensorTimeoutStartsAtFirstOdometryWithoutAPairedCloud) {
   EXPECT_TRUE(map->getOdomDepthTimeout());
 }
 
+TEST_F(RollingGridMap, ZShiftsRefreshAllAndOnlyRetainedInflation) {
+  checkInflationAfterShift(Eigen::Vector3d(0.0, 0.0, 0.2));
+  checkInflationAfterShift(Eigen::Vector3d(0.0, 0.0, -0.2));
+}
+
+TEST_F(RollingGridMap, DiagonalShiftsRefreshAllAndOnlyRetainedInflation) {
+  checkInflationAfterShift(Eigen::Vector3d(0.2, 0.2, 0.2));
+  checkInflationAfterShift(Eigen::Vector3d(-0.2, 0.2, -0.2));
+}
+
+TEST_F(RollingGridMap, FullJumpForgetsAllInflation) {
+  checkInflationAfterShift(Eigen::Vector3d(5.0, -5.0, 3.0));
+}
+
 void recenterTiming(const std::string &name, const Eigen::Vector3d &shift, int wall_axis) {
   rclcpp::NodeOptions options;
   // Long rays populate the entire dense boundary plane, not just a lidar disc.
@@ -219,6 +256,7 @@ void recenterTiming(const std::string &name, const Eigen::Vector3d &shift, int w
   }
   std::cout << "Default window " << name << " recenter: mean " << total_ms / 100.0
             << " ms, max " << max_ms << " ms (100 shifts)" << std::endl;
+  EXPECT_LT(total_ms / 100.0, 20.0);  // Loose regression bound, not a real-time guarantee.
   EXPECT_EQ(map.bufferCells(), 240u * 240u * 80u);
 }
 

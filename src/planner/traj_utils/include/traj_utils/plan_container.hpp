@@ -208,10 +208,10 @@ namespace ego_planner
   {
     /* info of generated traj */
 
-    int traj_id_;
-    double duration_;
+    int traj_id_{0};
+    double duration_{0.0};
     rclcpp::Time start_time_;
-    Eigen::Vector3d start_pos_;
+    Eigen::Vector3d start_pos_{Eigen::Vector3d::Zero()};
     UniformBspline position_traj_, velocity_traj_, acceleration_traj_;
   };
 
@@ -219,10 +219,10 @@ namespace ego_planner
   {
     /* info of generated traj */
 
-    int drone_id;
-    double duration_;
+    int drone_id{-1}; // -1: no trajectory
+    double duration_{0.0};
     rclcpp::Time start_time_;
-    Eigen::Vector3d start_pos_;
+    Eigen::Vector3d start_pos_{Eigen::Vector3d::Zero()};
     UniformBspline position_traj_;
   };
 

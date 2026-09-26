@@ -20,13 +20,13 @@ namespace ego_planner
     // e.g. B-spline with N points in 3D space -> Nx3 matrix
     Eigen::MatrixXd control_points_;
 
-    int p_, n_, m_;     // p degree, n+1 control points, m = n+p+1
+    int p_{0}, n_{0}, m_{0}; // p degree, n+1 control points, m = n+p+1
     Eigen::VectorXd u_; // knots vector
-    double interval_;   // knot span \delta t
+    double interval_{0.0};   // knot span \delta t
 
     Eigen::MatrixXd getDerivativeControlPoints();
 
-    double limit_vel_, limit_acc_, limit_ratio_, feasibility_tolerance_; // physical limits and time adjustment ratio
+    double limit_vel_{0.0}, limit_acc_{0.0}, limit_ratio_{0.0}, feasibility_tolerance_{0.0}; // physical limits and time adjustment ratio
 
   public:
     UniformBspline() {}

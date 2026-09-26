@@ -14,6 +14,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(quadrotor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -58,7 +59,7 @@ add_executable(ego_planner_node
 # )
 
 ament_target_dependencies(ego_planner_node 
-                          rclcpp nav_msgs visualization_msgs 
+                          rclcpp std_msgs nav_msgs visualization_msgs 
                           geometry_msgs quadrotor_msgs 
                           plan_env path_searching 
                           bspline_opt traj_utils 

@@ -9,6 +9,7 @@
 #include "sensor_msgs/msg/imu.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/empty.hpp"
+#include "std_msgs/msg/string.hpp"
 #include <vector>
 #include "visualization_msgs/msg/marker.hpp"
 
@@ -63,6 +64,7 @@ namespace ego_planner
     double emergency_time_;
     bool flag_realworld_experiment_;
     bool enable_fail_safe_;
+    bool configured_fail_safe_;
 
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
@@ -89,6 +91,8 @@ namespace ego_planner
     rclcpp::Subscription<traj_utils::msg::MultiBsplines>::SharedPtr swarm_trajs_sub_;
     rclcpp::Subscription<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_sub_;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr trigger_sub_;
+    rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr cancel_sub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fsm_state_pub_;
 
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr replan_pub_;
     // rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr new_pub_;
@@ -107,6 +111,9 @@ namespace ego_planner
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);
     std::pair<int, EGOReplanFSM::FSM_EXEC_STATE> timesOfConsecutiveStateCalls();
     void printFSMExecState();
+    /* SwarmDeck: the FSM state, for the adapter to follow a goal */
+    void publishFSMState();
+    void cancelCallback(const std::shared_ptr<const std_msgs::msg::Empty> &msg);
 
     void readGivenWps();
     void planNextWaypoint(const Eigen::Vector3d next_wp);

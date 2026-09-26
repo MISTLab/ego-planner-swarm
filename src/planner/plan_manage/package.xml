@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
   <depend>ament_cmake</depend>
   <depend>geometry_msgs</depend>
   <depend>quadrotor_msgs</depend>

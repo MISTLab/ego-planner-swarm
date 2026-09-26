@@ -1,4 +1,5 @@
 
+#include <cmath>
 #include <ego_planner/ego_replan_fsm.h>
 
 namespace ego_planner
@@ -31,6 +32,7 @@ namespace ego_planner
     node_->get_parameter("fsm/emergency_time", emergency_time_);
     node_->get_parameter("fsm/realworld_experiment", flag_realworld_experiment_);
     node_->get_parameter("fsm/fail_safe", enable_fail_safe_);
+    configured_fail_safe_ = enable_fail_safe_;
 
     have_trigger_ = !flag_realworld_experiment_;
 
@@ -111,15 +113,24 @@ namespace ego_planner
 
     bspline_pub_ = node_->create_publisher<traj_utils::msg::Bspline>("planning/bspline", 10);
     data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
+    fsm_state_pub_ = node_->create_publisher<std_msgs::msg::String>(
+        "planning/fsm_state", rclcpp::QoS(1).transient_local());
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
     {
       waypoint_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
-          "/move_base_simple/goal",
+          "goal",
           1,
           [this](const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg)
           {
             this->waypointCallback(msg);
+          });
+      cancel_sub_ = node_->create_subscription<std_msgs::msg::Empty>(
+          "cancel",
+          1,
+          [this](const std::shared_ptr<const std_msgs::msg::Empty> &msg)
+          {
+            this->cancelCallback(msg);
           });
     }
     else if (target_type_ == TARGET_TYPE::PRESET_TARGET)
@@ -204,18 +215,16 @@ namespace ego_planner
       have_target_ = true;
       have_new_target_ = true;
 
-      /*** FSM状态转换 ***/
-      if (exec_state_ == WAIT_TARGET)
-        changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
-      else
+      /*** FSM state change (SwarmDeck: never block the executor) ***/
+      enable_fail_safe_ = configured_fail_safe_;
+      if (exec_state_ == INIT)
       {
-        while (exec_state_ != EXEC_TRAJ)
-        {
-          rclcpp::spin_some(node_);
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        changeFSMExecState(REPLAN_TRAJ, "TRIG");
+        // WAIT_TARGET takes the target once odometry has arrived.
       }
+      else if (exec_state_ == EXEC_TRAJ)
+        changeFSMExecState(REPLAN_TRAJ, "TRIG");
+      else
+        changeFSMExecState(GEN_NEW_TRAJ, "TRIG");
 
       visualization_->displayGlobalPathList(gloabl_traj, 0.1, 0);
     }
@@ -234,16 +243,16 @@ namespace ego_planner
 
   void EGOReplanFSM::waypointCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg)
   {
-    if (msg->pose.position.z < -0.1)
+    const auto &p = msg->pose.position;
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
       return;
 
     cout << "Triggered!" << endl;
 
     init_pt_ = odom_pos_;
+    have_trigger_ = true;
 
-    Eigen::Vector3d end_wp(msg->pose.position.x, msg->pose.position.y, 1.0);
-
-    planNextWaypoint(end_wp);
+    planNextWaypoint(Eigen::Vector3d(p.x, p.y, p.z));
   }
 
   void EGOReplanFSM::odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry> &msg)
@@ -447,6 +456,8 @@ namespace ego_planner
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
+    if (int(new_state) != pre_s)
+      publishFSMState();
   }
 
   std::pair<int, EGOReplanFSM::FSM_EXEC_STATE> EGOReplanFSM::timesOfConsecutiveStateCalls()
@@ -461,6 +472,21 @@ namespace ego_planner
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
 
+  void EGOReplanFSM::publishFSMState()
+  {
+    static const string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START"};
+    std_msgs::msg::String msg;
+    msg.data = state_str[int(exec_state_)];
+    fsm_state_pub_->publish(msg);
+  }
+
+  void EGOReplanFSM::cancelCallback(const std::shared_ptr<const std_msgs::msg::Empty> &)
+  {
+    have_target_ = false;
+    if (exec_state_ != INIT)
+      changeFSMExecState(WAIT_TARGET, "CANCEL");
+  }
+
   void EGOReplanFSM::execFSMCallback()
   {
     exec_timer_->cancel(); // To avoid blockage
@@ -470,6 +496,7 @@ namespace ego_planner
     if (fsm_num == 100)
     {
       printFSMExecState();
+      publishFSMState();
       if (!have_odom_)
         cout << "no odom." << endl;
       if (!have_target_)

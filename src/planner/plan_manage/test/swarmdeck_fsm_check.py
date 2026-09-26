@@ -156,11 +156,11 @@ class Harness:
     def now(self) -> float:
         return time.monotonic()
 
-    def spawn(self, name: str, cmd: list[str]) -> None:
-        log = open(os.path.join(LOG_DIR, f"{name}.log"), "w")
-        self.processes.append(
-            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        )
+    def spawn(self, name: str, cmd: list[str]) -> subprocess.Popen:
+        log = open(os.path.join(LOG_DIR, f"{name}.log"), "a")
+        process = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        self.processes.append(process)
+        return process
 
     def stop_processes(self) -> None:
         for process in self.processes:
@@ -230,9 +230,25 @@ class Drone:
             node.create_timer(0.01, self.publish_odom),
             node.create_timer(0.1, self.publish_cloud),
         ]
-        self.start_processes(extra_parameters or {})
+        self.extra_parameters = extra_parameters or {}
+        self.processes: list[subprocess.Popen] = []
+        self.start_processes(self.extra_parameters)
 
     # -- processes
+    def restart(self) -> None:
+        """Kill this drone's planner and traj_server and start them again."""
+        for process in self.processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGINT)
+        for process in self.processes:
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        self.processes = []
+        self.start_processes(self.extra_parameters)
+
     def start_processes(self, extra_parameters: dict) -> None:
         ns = f"/{self.robot}/ego"
         parameters = planner_parameters(self.robot, self.drone_id)
@@ -255,13 +271,13 @@ class Drone:
             cmd += ["-r", f"{key}:={value}"]
         for key, value in parameters.items():
             cmd += ["-p", f"{key}:={ros_arg_value(value)}"]
-        self.harness.spawn(f"{self.robot}_planner", cmd)
-        self.harness.spawn(f"{self.robot}_traj_server", [
+        self.processes.append(self.harness.spawn(f"{self.robot}_planner", cmd))
+        self.processes.append(self.harness.spawn(f"{self.robot}_traj_server", [
             "ros2", "run", "ego_planner", "traj_server", "--ros-args",
             "-r", "__node:=traj_server", "-r", f"__ns:={ns}",
             "-r", f"position_cmd:=/{self.robot}/flight/position_cmd",
             "-p", "traj_server/time_forward:=1.0",
-        ])
+        ]))
 
     def close(self) -> None:
         node = self.harness.node
@@ -714,6 +730,80 @@ def blocked_start(s: Scenario) -> None:
     s.check(d.state() == "GEN_NEW_TRAJ", f"state {d.state()}, expected GEN_NEW_TRAJ (failing)")
 
 
+def goal_changes_in_sequential_start(s: Scenario) -> None:
+    """While drone 1 waits in SEQUENTIAL_START (no drone 0): a replacement goal
+    replaces the target without restarting the timeout, and after a cancel the
+    handshake still completes and a later goal flies at once."""
+    d = s.drone(1, start=(0.0, 3.0, 1.2))
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    odom = s.harness.now()
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 5.0), f"state {d.state()}")
+    d.send_goal(10.0, 3.0, 1.5)
+    s.check(wait_for(lambda: d.state() == "SEQUENTIAL_START", 2.0), f"state {d.state()}")
+    time.sleep(3.0)
+    replacement = (6.0, 1.0, 1.8)
+    d.send_goal(*replacement)
+    time.sleep(1.0)
+    s.check(d.state() == "SEQUENTIAL_START", f"state {d.state()} after the replacement goal")
+    s.check(not d.bsplines, "planned before the handshake")
+    s.check(wait_for(lambda: d.reached_state("EXEC_TRAJ"), 12.0), "never flew")
+    started = d.reached_state("EXEC_TRAJ")
+    if started:
+        s.note(f"replacement: EXEC_TRAJ {started - odom:.2f} s after odometry (timeout 10 s, not restarted)")
+        s.check(started - odom <= 11.0, f"flew {started - odom:.2f} s after odometry: timeout restarted")
+    s.check(wait_for(lambda: d.near(replacement, 0.3), 20.0), f"at {d.pos}, goal {replacement}")
+
+    # A second drone 1, cancelled while it waits.
+    d2 = s.drone(1, start=(0.0, -3.0, 1.2))
+    if not s.check(d2.wait_ready(), "second planner not up"):
+        return
+    odom2 = s.harness.now()
+    d2.odom_enabled = True
+    s.check(wait_for(lambda: d2.state() == "WAIT_TARGET", 5.0), f"state {d2.state()}")
+    d2.send_goal(10.0, -3.0, 1.5)
+    s.check(wait_for(lambda: d2.state() == "SEQUENTIAL_START", 2.0), f"state {d2.state()}")
+    time.sleep(1.0)
+    d2.cancel()
+    s.check(wait_for(lambda: d2.state() == "WAIT_TARGET", 2.0), f"state {d2.state()} after cancel")
+    s.check(wait_for(lambda: STARTUP_TIMEOUT_WARNING in d2.log(), 12.0), "the handshake did not complete")
+    s.check(not d2.bsplines and d2.commands == 0, "flew the cancelled goal")
+    s.check(d2.state() == "WAIT_TARGET", f"state {d2.state()} after the handshake")
+    goal_sent = s.harness.now()
+    d2.send_goal(6.0, -3.0, 1.5)
+    s.check(wait_for(lambda: d2.reached_state("EXEC_TRAJ", goal_sent), 2.0), "a goal after the handshake did not fly at once")
+    s.check(not d2.reached_state("SEQUENTIAL_START", goal_sent), "went back to SEQUENTIAL_START")
+    s.note(f"cancelled: handshake by timeout {s.harness.now() - odom2:.1f} s after odometry, then flew on the next goal")
+
+
+def predecessor_restart(s: Scenario) -> None:
+    """Drone 0 restarts after the handshake: drone 1 keeps flying, does not
+    wait for it again, and both fly new goals."""
+    d0 = s.drone(0, start=(0.0, 0.0, 1.2))
+    d1 = s.drone(1, start=(0.0, 3.0, 1.2))
+    if not s.check(d0.wait_ready() and d1.wait_ready(), "planners not up"):
+        return
+    d0.odom_enabled = d1.odom_enabled = True
+    s.check(wait_for(lambda: d1.state() == "WAIT_TARGET", 5.0), f"drone 1: {d1.state()}")
+    d1.send_goal(18.0, 3.0, 1.5)
+    s.check(wait_for(lambda: d1.reached_state("EXEC_TRAJ"), 5.0), "drone 1 never flew")
+    s.check(wait_for(lambda: d1.pos[0] > 2.0, 5.0), f"drone 1 at {d1.pos}")
+    restarted = s.harness.now()
+    d0.restart()
+    s.check(wait_for(lambda: d0.reached_state("WAIT_TARGET", restarted), 15.0), "drone 0 did not come back")
+    time.sleep(1.0)
+    s.check(not d1.reached_state("SEQUENTIAL_START", restarted), "drone 1 went back to SEQUENTIAL_START")
+    s.check(d1.state() in ("EXEC_TRAJ", "REPLAN_TRAJ", "WAIT_TARGET"), f"drone 1 in {d1.state()}")
+    s.check(wait_for(lambda: d1.near((18.0, 3.0, 1.5), 0.3), 20.0), f"drone 1 at {d1.pos}")
+    goal_sent = s.harness.now()
+    d1.send_goal(10.0, 3.0, 1.5)
+    d0.send_goal(10.0, 0.0, 1.5)
+    s.check(wait_for(lambda: d1.reached_state("EXEC_TRAJ", goal_sent), 3.0), "drone 1 did not fly a new goal")
+    s.check(wait_for(lambda: d0.reached_state("EXEC_TRAJ", goal_sent), 3.0), "restarted drone 0 did not fly")
+    s.check(STARTUP_TIMEOUT_WARNING not in d1.log(), "drone 1 timed out")
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
@@ -723,6 +813,8 @@ SCENARIOS = {
     "lone_follower": lone_follower,
     "handshake_keeps_live_peers": handshake_keeps_live_peers,
     "blocked_start": blocked_start,
+    "goal_changes_in_sequential_start": goal_changes_in_sequential_start,
+    "predecessor_restart": predecessor_restart,
     "heartbeat": heartbeat,
 }
 

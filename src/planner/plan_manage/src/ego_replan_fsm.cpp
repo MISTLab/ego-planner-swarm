@@ -78,7 +78,7 @@ namespace ego_planner
 
     if (planner_manager_->pp_.drone_id >= 1)
     {
-      string sub_topic_name = string("/drone_") + std::to_string(planner_manager_->pp_.drone_id - 1) + string("_planning/swarm_trajs");
+      string sub_topic_name = string("drone_") + std::to_string(planner_manager_->pp_.drone_id - 1) + string("_planning/swarm_trajs");
       swarm_trajs_sub_ = node_->create_subscription<traj_utils::msg::MultiBsplines>(
           sub_topic_name,
           10,
@@ -94,10 +94,10 @@ namespace ego_planner
     if (planner_manager_->pp_.drone_id <= -1)
     {
       RCLCPP_INFO(node_->get_logger(), "single drone:%d", planner_manager_->pp_.drone_id);
-      pub_topic_name = string("/drone_") + "single" + string("_planning/swarm_trajs");
+      pub_topic_name = string("drone_") + "single" + string("_planning/swarm_trajs");
     }else
     {
-      pub_topic_name = string("/drone_") + std::to_string(planner_manager_->pp_.drone_id) + string("_planning/swarm_trajs");
+      pub_topic_name = string("drone_") + std::to_string(planner_manager_->pp_.drone_id) + string("_planning/swarm_trajs");
     }
     
     swarm_trajs_pub_ = node_->create_publisher<traj_utils::msg::MultiBsplines>(pub_topic_name, 10);
@@ -136,7 +136,7 @@ namespace ego_planner
     else if (target_type_ == TARGET_TYPE::PRESET_TARGET)
     {
       trigger_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
-          "/traj_start_trigger",
+          "traj_start_trigger",
           1,
           [this](const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg)
           {

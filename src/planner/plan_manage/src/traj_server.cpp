@@ -242,7 +242,7 @@ int main(int argc, char **argv)
       bsplineCallback);
 
   pos_cmd_pub = node->create_publisher<quadrotor_msgs::msg::PositionCommand>(
-      "/position_cmd",
+      "position_cmd",
       50);
 
   auto cmd_timer = node->create_wall_timer(

@@ -70,6 +70,9 @@ namespace ego_planner
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
+    /* SwarmDeck: a goal received before odometry, planned from the first odometry */
+    bool have_pending_goal_{false};
+    Eigen::Vector3d pending_goal_;
 
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
     Eigen::Quaterniond odom_orient_;

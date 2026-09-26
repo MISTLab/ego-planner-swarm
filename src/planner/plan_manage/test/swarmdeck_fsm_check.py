@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""SwarmDeck's checks of EGO's goal, cancel and FSM-state interface.
+
+Each scenario starts real ego_planner_node and traj_server processes in the
+SwarmDeck layout (namespace /<robot>/ego, relative topics remapped as
+SwarmDeck's drone.launch.py does) and flies perfect-tracker drones: odometry
+is the latest PositionCommand, and the lidar is a synthetic corridor cloud.
+It then asserts on the FSM states, B-splines and commands the planners publish.
+
+    source install/setup.bash
+    python3 src/planner/plan_manage/test/swarmdeck_fsm_check.py [SCENARIO ...]
+
+Run it in an isolated container (--network none, a private ROS_DOMAIN_ID).
+Every scenario uses its own topic prefix, so scenarios cannot hear each other.
+Exit status 0 when every scenario passes.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+import numpy as np
+import rclpy
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from quadrotor_msgs.msg import PositionCommand
+from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Empty, String
+from traj_utils.msg import Bspline
+
+LOG_DIR = os.environ.get("EGO_CHECK_LOG_DIR", tempfile.mkdtemp(prefix="ego-check-"))
+
+
+def planner_parameters(robot: str, drone_id: int) -> dict:
+    """SwarmDeck's drone.launch.py values, at 2 m/s."""
+    return {
+        "fsm/flight_type": 1,
+        "fsm/thresh_replan_time": 1.0,
+        "fsm/thresh_no_replan_meter": 1.0,
+        "fsm/planning_horizon": 7.5,
+        "fsm/planning_horizen_time": 3.0,
+        "fsm/emergency_time": 1.0,
+        "fsm/realworld_experiment": False,
+        "fsm/fail_safe": True,
+        "fsm/waypoint_num": 1,
+        "fsm/waypoint0_x": 0.0,
+        "fsm/waypoint0_y": 0.0,
+        "fsm/waypoint0_z": 1.0,
+        "grid_map/resolution": 0.1,
+        "grid_map/map_size_x": 50.0,
+        "grid_map/map_size_y": 50.0,
+        "grid_map/map_size_z": 6.0,
+        "grid_map/local_update_range_x": 5.5,
+        "grid_map/local_update_range_y": 5.5,
+        "grid_map/local_update_range_z": 4.5,
+        "grid_map/obstacles_inflation": 0.25,
+        "grid_map/local_map_margin": 10,
+        "grid_map/ground_height": -1.0,
+        "grid_map/cx": 321.04638671875,
+        "grid_map/cy": 243.44969177246094,
+        "grid_map/fx": 387.229248046875,
+        "grid_map/fy": 387.229248046875,
+        "grid_map/use_depth_filter": True,
+        "grid_map/depth_filter_tolerance": 0.15,
+        "grid_map/depth_filter_maxdist": 5.0,
+        "grid_map/depth_filter_mindist": 0.2,
+        "grid_map/depth_filter_margin": 2,
+        "grid_map/k_depth_scaling_factor": 1000.0,
+        "grid_map/skip_pixel": 2,
+        "grid_map/p_hit": 0.65,
+        "grid_map/p_miss": 0.35,
+        "grid_map/p_min": 0.12,
+        "grid_map/p_max": 0.90,
+        "grid_map/p_occ": 0.80,
+        "grid_map/min_ray_length": 0.1,
+        "grid_map/max_ray_length": 8.0,
+        "grid_map/virtual_ceil_height": -1.0,
+        "grid_map/visualization_truncate_height": 100.0,
+        "grid_map/show_occ_time": False,
+        "grid_map/pose_type": 2,
+        "grid_map/frame_id": f"{robot}/odom",
+        "grid_map/odom_depth_timeout": 3.0,
+        "manager/max_vel": 2.0,
+        "manager/max_acc": 3.0,
+        "manager/max_jerk": 4.0,
+        "manager/control_points_distance": 0.4,
+        "manager/feasibility_tolerance": 0.05,
+        "manager/planning_horizon": 7.5,
+        "manager/use_distinctive_trajs": True,
+        "manager/drone_id": drone_id,
+        "optimization/lambda_smooth": 1.0,
+        "optimization/lambda_collision": 0.5,
+        "optimization/lambda_feasibility": 0.1,
+        "optimization/lambda_fitness": 1.0,
+        "optimization/dist0": 0.5,
+        "optimization/swarm_clearance": 0.5,
+        "optimization/max_vel": 2.0,
+        "optimization/max_acc": 3.0,
+        "bspline/limit_vel": 2.0,
+        "bspline/limit_acc": 3.0,
+        "bspline/limit_ratio": 1.1,
+        "prediction/obj_num": 0,
+        "prediction/lambda": 1.0,
+        "prediction/predict_rate": 1.0,
+    }
+
+
+def ros_arg_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return repr(value) if isinstance(value, float) else str(value)
+
+
+def corridor_cloud_points() -> np.ndarray:
+    """Walls at y = +/-6 from x = -5 to 25, 0 to 3 m high, every 0.25 m."""
+    xs = np.arange(-5.0, 25.0 + 1e-9, 0.25)
+    zs = np.arange(0.0, 3.0 + 1e-9, 0.25)
+    grid_x, grid_z = np.meshgrid(xs, zs)
+    walls = [
+        np.column_stack([grid_x.ravel(), np.full(grid_x.size, y), grid_z.ravel()])
+        for y in (-6.0, 6.0)
+    ]
+    return np.vstack(walls).astype("<f4")
+
+
+CLOUD_POINTS = corridor_cloud_points()
+CLOUD_FIELDS = [
+    PointField(name=n, offset=4 * i, datatype=PointField.FLOAT32, count=1)
+    for i, n in enumerate("xyz")
+]
+
+
+class Harness:
+    """The rclpy side of every scenario: one node spun in a background thread."""
+
+    def __init__(self) -> None:
+        rclpy.init()
+        self.node = rclpy.create_node("ego_fsm_check")
+        self.executor = SingleThreadedExecutor()
+        self.executor.add_node(self.node)
+        self.thread = threading.Thread(target=self.executor.spin, daemon=True)
+        self.thread.start()
+        self.processes: list[subprocess.Popen] = []
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def spawn(self, name: str, cmd: list[str]) -> None:
+        log = open(os.path.join(LOG_DIR, f"{name}.log"), "w")
+        self.processes.append(
+            subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        )
+
+    def stop_processes(self) -> None:
+        for process in self.processes:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGINT)
+        deadline = time.monotonic() + 5.0
+        for process in self.processes:
+            try:
+                process.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        self.processes.clear()
+
+    def shutdown(self) -> None:
+        self.stop_processes()
+        self.executor.shutdown()
+        self.thread.join(timeout=5.0)
+        self.node.destroy_node()
+        rclpy.shutdown()
+
+
+def wait_for(predicate, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return bool(predicate())
+
+
+class Drone:
+    """One planner and traj_server pair and its perfect-tracker drone."""
+
+    def __init__(self, harness: Harness, scenario: str, index: int, drone_id: int,
+                 start=(0.0, 0.0, 1.2), extra_parameters: dict | None = None) -> None:
+        self.harness = harness
+        self.robot = f"{scenario}_{index}"
+        self.shared = f"/{scenario}_ego"
+        self.drone_id = drone_id
+        self.pos = list(start)
+        self.vel = [0.0, 0.0, 0.0]
+        self.odom_enabled = False
+        self.states: list[tuple[float, str]] = []
+        self.bsplines: list[tuple[float, Bspline]] = []
+        self.commands = 0
+        node = harness.node
+        ns = f"/{self.robot}/ego"
+        latched = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.subscriptions = [
+            node.create_subscription(String, f"{ns}/planning/fsm_state", self.on_state, latched),
+            node.create_subscription(Bspline, f"{ns}/planning/bspline", self.on_bspline, 10),
+            node.create_subscription(
+                PositionCommand, f"/{self.robot}/flight/position_cmd", self.on_command, 100
+            ),
+        ]
+        self.goal_pub = node.create_publisher(PoseStamped, f"{ns}/goal", 10)
+        self.cancel_pub = node.create_publisher(Empty, f"{ns}/cancel", 10)
+        self.odom_pub = node.create_publisher(Odometry, f"/{self.robot}/odom", 10)
+        self.cloud_pub = node.create_publisher(PointCloud2, f"/{self.robot}/scan/points_odom", 10)
+        self.timers = [
+            node.create_timer(0.01, self.publish_odom),
+            node.create_timer(0.1, self.publish_cloud),
+        ]
+        self.start_processes(extra_parameters or {})
+
+    # -- processes
+    def start_processes(self, extra_parameters: dict) -> None:
+        ns = f"/{self.robot}/ego"
+        parameters = planner_parameters(self.robot, self.drone_id)
+        parameters.update(extra_parameters)
+        swarm = "drone_{}_planning/swarm_trajs"
+        remaps = {
+            "odom_world": f"/{self.robot}/odom",
+            "grid_map/odom": f"/{self.robot}/odom",
+            "grid_map/cloud": f"/{self.robot}/scan/points_odom",
+            "planning/broadcast_bspline_from_planner": f"{self.shared}/broadcast_bspline",
+            "planning/broadcast_bspline_to_planner": f"{self.shared}/broadcast_bspline",
+            swarm.format(self.drone_id): f"{self.shared}/{swarm.format(self.drone_id)}",
+        }
+        if self.drone_id >= 1:
+            previous = swarm.format(self.drone_id - 1)
+            remaps[previous] = f"{self.shared}/{previous}"
+        cmd = ["ros2", "run", "ego_planner", "ego_planner_node", "--ros-args",
+               "-r", "__node:=ego_planner", "-r", f"__ns:={ns}"]
+        for key, value in remaps.items():
+            cmd += ["-r", f"{key}:={value}"]
+        for key, value in parameters.items():
+            cmd += ["-p", f"{key}:={ros_arg_value(value)}"]
+        self.harness.spawn(f"{self.robot}_planner", cmd)
+        self.harness.spawn(f"{self.robot}_traj_server", [
+            "ros2", "run", "ego_planner", "traj_server", "--ros-args",
+            "-r", "__node:=traj_server", "-r", f"__ns:={ns}",
+            "-r", f"position_cmd:=/{self.robot}/flight/position_cmd",
+            "-p", "traj_server/time_forward:=1.0",
+        ])
+
+    def close(self) -> None:
+        node = self.harness.node
+        for timer in self.timers:
+            node.destroy_timer(timer)
+        for subscription in self.subscriptions:
+            node.destroy_subscription(subscription)
+        for publisher in (self.goal_pub, self.cancel_pub, self.odom_pub, self.cloud_pub):
+            node.destroy_publisher(publisher)
+
+    # -- callbacks
+    def on_state(self, msg: String) -> None:
+        self.states.append((self.harness.now(), msg.data))
+
+    def on_bspline(self, msg: Bspline) -> None:
+        self.bsplines.append((self.harness.now(), msg))
+
+    def on_command(self, msg: PositionCommand) -> None:
+        self.commands += 1
+        self.pos = [msg.position.x, msg.position.y, msg.position.z]
+        self.vel = [msg.velocity.x, msg.velocity.y, msg.velocity.z]
+
+    def publish_odom(self) -> None:
+        if not self.odom_enabled:
+            return
+        odom = Odometry()
+        odom.header.stamp = self.harness.node.get_clock().now().to_msg()
+        odom.header.frame_id = f"{self.robot}/odom"
+        odom.child_frame_id = f"{self.robot}/base_link"
+        p, v = odom.pose.pose.position, odom.twist.twist.linear
+        p.x, p.y, p.z = self.pos
+        v.x, v.y, v.z = self.vel
+        odom.pose.pose.orientation.w = 1.0
+        self.odom_pub.publish(odom)
+
+    def publish_cloud(self) -> None:
+        cloud = PointCloud2()
+        cloud.header.stamp = self.harness.node.get_clock().now().to_msg()
+        cloud.header.frame_id = f"{self.robot}/odom"
+        cloud.height, cloud.width = 1, len(CLOUD_POINTS)
+        cloud.fields = CLOUD_FIELDS
+        cloud.is_bigendian = False
+        cloud.point_step, cloud.row_step = 12, 12 * len(CLOUD_POINTS)
+        cloud.is_dense = True
+        cloud.data = CLOUD_POINTS.tobytes()
+        self.cloud_pub.publish(cloud)
+
+    # -- commands and queries
+    def wait_ready(self, timeout: float = 20.0) -> bool:
+        """The planner is up and subscribed to its goal and cancel topics."""
+        return wait_for(
+            lambda: self.states
+            and self.goal_pub.get_subscription_count() > 0
+            and self.cancel_pub.get_subscription_count() > 0,
+            timeout,
+        )
+
+    def send_goal(self, x: float, y: float, z: float) -> None:
+        goal = PoseStamped()
+        goal.header.stamp = self.harness.node.get_clock().now().to_msg()
+        goal.header.frame_id = f"{self.robot}/odom"
+        goal.pose.position.x, goal.pose.position.y, goal.pose.position.z = x, y, z
+        goal.pose.orientation.w = 1.0
+        self.goal_pub.publish(goal)
+
+    def cancel(self) -> None:
+        self.cancel_pub.publish(Empty())
+
+    def state(self) -> str | None:
+        return self.states[-1][1] if self.states else None
+
+    def reached_state(self, name: str, since: float = 0.0) -> float | None:
+        """When the planner first reported `name` after `since`, or None."""
+        for stamp, state in self.states:
+            if stamp >= since and state == name:
+                return stamp
+        return None
+
+    def near(self, point, tolerance: float) -> bool:
+        return math.dist(self.pos, point) <= tolerance
+
+    def log(self) -> str:
+        with open(os.path.join(LOG_DIR, f"{self.robot}_planner.log")) as stream:
+            return stream.read()
+
+
+class Scenario:
+    def __init__(self, harness: Harness, name: str) -> None:
+        self.harness = harness
+        self.name = name
+        self.drones: list[Drone] = []
+        self.failures: list[str] = []
+        self.notes: list[str] = []
+
+    def drone(self, drone_id: int, **kwargs) -> Drone:
+        drone = Drone(self.harness, self.name, len(self.drones), drone_id, **kwargs)
+        self.drones.append(drone)
+        return drone
+
+    def check(self, condition: bool, failure: str) -> bool:
+        if not condition:
+            self.failures.append(failure)
+        return condition
+
+    def note(self, text: str) -> None:
+        self.notes.append(text)
+
+    def close(self) -> None:
+        self.harness.stop_processes()
+        for drone in self.drones:
+            drone.close()
+
+
+# ------------------------------------------------------------------ scenarios
+
+
+def early_goal(s: Scenario) -> None:
+    """A goal before odometry waits for it; a newer goal replaces it."""
+    d = s.drone(0)
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.send_goal(12.0, 0.0, 1.5)
+    time.sleep(1.5)
+    s.check(not d.bsplines, "planned a trajectory before odometry")
+    s.check(d.state() == "INIT", f"state {d.state()} before odometry, expected INIT")
+    replacement = (6.0, 2.0, 1.8)
+    d.send_goal(*replacement)
+    time.sleep(0.5)
+    s.check(not d.bsplines, "planned the replacement goal before odometry")
+    started = d.harness.now()
+    d.odom_enabled = True
+    executing = wait_for(lambda: d.reached_state("EXEC_TRAJ", started), 10.0)
+    s.check(executing, "the pending goal was not flown after odometry arrived")
+    arrived = wait_for(lambda: d.near(replacement, 0.3), 20.0)
+    s.check(arrived, f"did not reach the replacement goal {replacement}: at {d.pos}")
+    s.note(f"reached {replacement}: {arrived}, at {[round(v, 2) for v in d.pos]}")
+
+
+def early_goal_cancel(s: Scenario) -> None:
+    """A goal cancelled before odometry is never flown."""
+    d = s.drone(0)
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.send_goal(12.0, 0.0, 1.5)
+    time.sleep(1.0)
+    d.cancel()
+    time.sleep(0.5)
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 5.0), "never reached WAIT_TARGET")
+    time.sleep(4.0)
+    s.check(d.state() == "WAIT_TARGET", f"state {d.state()} after a cancelled goal")
+    s.check(not d.bsplines, f"{len(d.bsplines)} trajectories for a cancelled goal")
+    s.check(d.commands == 0, f"{d.commands} commands for a cancelled goal")
+
+
+SCENARIOS = {
+    "early_goal": early_goal,
+    "early_goal_cancel": early_goal_cancel,
+}
+
+
+def main(argv: list[str]) -> int:
+    names = argv or list(SCENARIOS)
+    harness = Harness()
+    failed = []
+    try:
+        for name in names:
+            scenario = Scenario(harness, name)
+            began = time.monotonic()
+            try:
+                SCENARIOS[name](scenario)
+            finally:
+                scenario.close()
+            verdict = "FAIL" if scenario.failures else "PASS"
+            print(f"{verdict} {name} ({time.monotonic() - began:.1f} s)", flush=True)
+            for line in scenario.notes:
+                print(f"    note: {line}", flush=True)
+            for line in scenario.failures:
+                print(f"    {line}", flush=True)
+            if scenario.failures:
+                failed.append(name)
+    finally:
+        harness.shutdown()
+    print(f"logs: {LOG_DIR}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

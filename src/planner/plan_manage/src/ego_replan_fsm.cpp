@@ -249,9 +249,17 @@ namespace ego_planner
 
     cout << "Triggered!" << endl;
 
-    init_pt_ = odom_pos_;
     have_trigger_ = true;
+    if (!have_odom_)
+    {
+      // The global trajectory starts at the drone: plan it from the first odometry.
+      pending_goal_ = Eigen::Vector3d(p.x, p.y, p.z);
+      have_pending_goal_ = true;
+      RCLCPP_INFO(node_->get_logger(), "No odometry yet: the goal waits for it.");
+      return;
+    }
 
+    init_pt_ = odom_pos_;
     planNextWaypoint(Eigen::Vector3d(p.x, p.y, p.z));
   }
 
@@ -273,6 +281,13 @@ namespace ego_planner
     odom_orient_.z() = msg->pose.pose.orientation.z;
 
     have_odom_ = true;
+
+    if (have_pending_goal_)
+    {
+      have_pending_goal_ = false;
+      init_pt_ = odom_pos_;
+      planNextWaypoint(pending_goal_);
+    }
   }
 
   void EGOReplanFSM::BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline> &msg)
@@ -483,6 +498,7 @@ namespace ego_planner
   void EGOReplanFSM::cancelCallback(const std::shared_ptr<const std_msgs::msg::Empty> &)
   {
     have_target_ = false;
+    have_pending_goal_ = false;
     if (exec_state_ != INIT)
       changeFSMExecState(WAIT_TARGET, "CANCEL");
   }

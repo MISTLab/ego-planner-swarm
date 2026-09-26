@@ -28,6 +28,7 @@ import time
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import Point as PointMsg
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry
 from quadrotor_msgs.msg import PositionCommand
@@ -344,6 +345,42 @@ class Drone:
         with open(os.path.join(LOG_DIR, f"{self.robot}_planner.log")) as stream:
             return stream.read()
 
+    def bsplines_since(self, since: float) -> list[Bspline]:
+        return [msg for stamp, msg in self.bsplines if stamp >= since]
+
+
+def is_stationary(msg: Bspline) -> bool:
+    points = np.array([[p.x, p.y, p.z] for p in msg.pos_pts])
+    return len(points) > 0 and float(np.abs(points - points[0]).max()) < 1e-6
+
+
+def spline_point(msg: Bspline) -> list[float]:
+    return [msg.pos_pts[0].x, msg.pos_pts[0].y, msg.pos_pts[0].z]
+
+
+class Peer:
+    """Another drone's broadcast trajectory: hovering at `point` from now."""
+
+    def __init__(self, harness: Harness, shared: str, drone_id: int) -> None:
+        self.harness = harness
+        self.drone_id = drone_id
+        self.pub = harness.node.create_publisher(Bspline, f"{shared}/broadcast_bspline", 10)
+
+    def hover_at(self, point) -> None:
+        msg = Bspline()
+        msg.order = 3
+        msg.drone_id = self.drone_id
+        msg.traj_id = 1
+        msg.start_time = self.harness.node.get_clock().now().to_msg()
+        interval = 1.0
+        for _ in range(6):
+            msg.pos_pts.append(PointMsg(x=float(point[0]), y=float(point[1]), z=float(point[2])))
+        msg.knots = [(i - msg.order) * interval for i in range(len(msg.pos_pts) + msg.order + 1)]
+        self.pub.publish(msg)
+
+    def close(self) -> None:
+        self.harness.node.destroy_publisher(self.pub)
+
 
 class Scenario:
     def __init__(self, harness: Harness, name: str) -> None:
@@ -414,9 +451,63 @@ def early_goal_cancel(s: Scenario) -> None:
     s.check(d.commands == 0, f"{d.commands} commands for a cancelled goal")
 
 
+def cancel_stops(s: Scenario) -> None:
+    """Cancel stops the drone where it is, and a conflicting peer trajectory
+    afterwards does not make the planner fly toward the cancelled goal."""
+    d = s.drone(0)
+    peer = Peer(s.harness, d.shared, 7)
+    try:
+        if not s.check(d.wait_ready(), "planner not up"):
+            return
+        d.odom_enabled = True
+        s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 10.0), "never reached WAIT_TARGET")
+        goal = (18.0, 0.0, 1.5)
+        d.send_goal(*goal)
+        if not s.check(wait_for(lambda: d.reached_state("EXEC_TRAJ"), 10.0), "never flew"):
+            return
+        s.check(wait_for(lambda: d.pos[0] > 3.0, 10.0), f"did not get going: at {d.pos}")
+
+        # Control: in flight, the same kind of peer trajectory is a conflict.
+        mark = len(d.log())
+        peer.hover_at([d.pos[0] + 1.5, d.pos[1], d.pos[2]])
+        time.sleep(1.0)
+        s.check("[TRAJ_CHECK]" in d.log()[mark:], "control: an in-flight conflict was not replanned")
+
+        s.check(wait_for(lambda: d.pos[0] > 6.0, 10.0), f"did not get past x 6: at {d.pos}")
+        cancelled = s.harness.now()
+        at_cancel = list(d.pos)
+        mark = len(d.log())
+        d.cancel()
+        s.check(wait_for(lambda: d.bsplines_since(cancelled), 2.0), "no stop trajectory after cancel")
+        after = d.bsplines_since(cancelled)
+        stop = after[0] if after else None
+        s.check(stop is not None and is_stationary(stop), "the first trajectory after cancel is not a stop")
+        if stop is not None:
+            s.check(math.dist(spline_point(stop), at_cancel) < 0.5,
+                    f"stop at {spline_point(stop)}, drone was at {at_cancel}")
+        s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), f"state {d.state()} after cancel")
+        time.sleep(0.5)
+        stopped_at = list(d.pos)
+        count = len(after)
+        for _ in range(30):  # 3 s of fresh conflicting peer trajectories on the drone
+            peer.hover_at(d.pos)
+            time.sleep(0.1)
+        time.sleep(1.0)
+        s.check("[TRAJ_CHECK]" not in d.log()[mark:], "a peer trajectory replanned after cancel")
+        s.check(len(d.bsplines_since(cancelled)) == count,
+                f"{len(d.bsplines_since(cancelled)) - count} new trajectories after cancel")
+        s.check(d.state() == "WAIT_TARGET", f"state {d.state()} after the peer trajectories")
+        s.check(math.dist(d.pos, stopped_at) < 0.1, f"moved from {stopped_at} to {d.pos} after cancel")
+        s.note(f"cancelled at x {at_cancel[0]:.2f}, stopped at x {stopped_at[0]:.2f}, "
+               f"now x {d.pos[0]:.2f}; goal x {goal[0]}")
+    finally:
+        peer.close()
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
+    "cancel_stops": cancel_stops,
 }
 
 

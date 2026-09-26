@@ -369,8 +369,8 @@ namespace ego_planner
 
     planner_manager_->swarm_trajs_buf_[id].start_time_ = msg->start_time;
 
-    /* Check Collision */
-    if (planner_manager_->checkCollision(id))
+    /* Check Collision (SwarmDeck: only a trajectory flown toward a target is replanned) */
+    if (have_target_ && exec_state_ == EXEC_TRAJ && planner_manager_->checkCollision(id))
     {
       changeFSMExecState(REPLAN_TRAJ, "TRAJ_CHECK");
     }
@@ -499,6 +499,12 @@ namespace ego_planner
   {
     have_target_ = false;
     have_pending_goal_ = false;
+    if (exec_state_ == GEN_NEW_TRAJ || exec_state_ == REPLAN_TRAJ || exec_state_ == EXEC_TRAJ || exec_state_ == EMERGENCY_STOP)
+    {
+      // A real stop: traj_server would otherwise fly the rest of the last trajectory.
+      callEmergencyStop(odom_pos_);
+      publishSwarmTrajs(false);
+    }
     if (exec_state_ != INIT)
       changeFSMExecState(WAIT_TARGET, "CANCEL");
   }
@@ -573,6 +579,11 @@ namespace ego_planner
 
     case GEN_NEW_TRAJ:
     {
+      if (!have_target_) // SwarmDeck: never plan toward a dropped target
+      {
+        changeFSMExecState(WAIT_TARGET, "FSM");
+        break;
+      }
 
       bool success = planFromGlobalTraj(10); // zx-todo
       if (success)
@@ -590,6 +601,11 @@ namespace ego_planner
 
     case REPLAN_TRAJ:
     {
+      if (!have_target_) // SwarmDeck: never plan toward a dropped target
+      {
+        changeFSMExecState(WAIT_TARGET, "FSM");
+        break;
+      }
 
       if (planFromCurrentTraj(1))
       {
@@ -745,7 +761,7 @@ namespace ego_planner
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
     
-    if (exec_state_ == WAIT_TARGET || info->start_time_.seconds() < 1e-5)
+    if (!have_target_ || exec_state_ == WAIT_TARGET || info->start_time_.seconds() < 1e-5)
       return;
 
     /* ---------- check lost of depth ---------- */

@@ -298,6 +298,17 @@ namespace ego_planner
       swarmTrajsCallback(startup);
     }
 
+    if (!early_broadcasts_.empty())
+    {
+      // Their freshness was checked on arrival and would fail now, since they
+      // waited for this odometry; the distance test, which needed our
+      // position, runs in mergeSwarmTraj like for any other trajectory.
+      for (const auto &kept : early_broadcasts_)
+        if (mergeSwarmTraj(kept.first, *kept.second, "Early"))
+          RCLCPP_INFO(node_->get_logger(), "Kept the trajectory of drone %d received before odometry.", (int)kept.first);
+      early_broadcasts_.clear();
+    }
+
     if (have_pending_goal_)
     {
       have_pending_goal_ = false;
@@ -312,11 +323,6 @@ namespace ego_planner
     if ((int)id == planner_manager_->pp_.drone_id)
       return;
 
-    // SwarmDeck: the distance test below needs our position; before the first
-    // odometry it is unset (peers re-broadcast with every replan).
-    if (!have_odom_)
-      return;
-
     // if (abs((ros::Time::now() - msg->start_time).toSec()) > 0.25)
     rclcpp::Clock clock(RCL_SYSTEM_TIME);  // 确保使用当前节点的时间源
     auto msg_time = rclcpp::Time(msg->start_time, clock.get_clock_type());
@@ -328,6 +334,20 @@ namespace ego_planner
       // ROS_ERROR("Time difference is too large! Local - Remote Agent %d = %fs", msg->drone_id, (ros::Time::now() - msg->start_time).toSec());
       RCLCPP_ERROR(node_->get_logger(), "Time difference is too large! Local - Remote Agent %d = %fs",
                    msg->drone_id, (rclcpp::Clock().now() - msg_time).seconds());
+      return;
+    }
+
+    // SwarmDeck: the distance test below needs our position, which is unset
+    // before the first odometry. Keep the newest broadcast of each peer until
+    // then (an idle peer never sends another); the first odometry merges it.
+    if (!have_odom_)
+    {
+      if (msg->order == 3 && msg->pos_pts.size() >= 3 && msg->knots.size() >= 2)
+      {
+        std::shared_ptr<const traj_utils::msg::Bspline> &kept = early_broadcasts_[id];
+        if (!kept || rclcpp::Time(kept->start_time).seconds() < rclcpp::Time(msg->start_time).seconds())
+          kept = msg;
+      }
       return;
     }
 
@@ -421,7 +441,6 @@ namespace ego_planner
     // Step 1. merge the startup trajectories (SwarmDeck: into the live buffer,
     // which is never cleared; an entry only fills a missing or older one, since
     // a retained startup snapshot can be older than the peer's broadcasts).
-    SwarmTrajData &buf = planner_manager_->swarm_trajs_buf_;
     for (size_t i = 0; i < msg->traj.size(); i++)
     {
       const traj_utils::msg::Bspline &traj = msg->traj[i];
@@ -430,65 +449,75 @@ namespace ego_planner
       if ((int)i == planner_manager_->pp_.drone_id || traj.order != 3 || traj.pos_pts.size() < 3 || traj.knots.size() < 2)
         continue;
 
-      if (buf.size() > i && buf[i].drone_id == (int)i &&
-          buf[i].start_time_.seconds() >= rclcpp::Time(traj.start_time).seconds())
-      {
-        RCLCPP_INFO(node_->get_logger(), "Startup trajectory of drone %d is older than its live one: kept the live one.", (int)i);
-        continue;
-      }
-
-      Eigen::Vector3d cp0(traj.pos_pts[0].x, traj.pos_pts[0].y, traj.pos_pts[0].z);
-      Eigen::Vector3d cp1(traj.pos_pts[1].x, traj.pos_pts[1].y, traj.pos_pts[1].z);
-      Eigen::Vector3d cp2(traj.pos_pts[2].x, traj.pos_pts[2].y, traj.pos_pts[2].z);
-      Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
-      if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
-        continue;
-
-      for (size_t j = buf.size(); j <= i; j++)
-      {
-        OneTrajDataOfSwarm blank;
-        blank.drone_id = -1;
-        buf.push_back(blank);
-      }
-
-      // 存储路径控制点和节点
-      Eigen::MatrixXd pos_pts(3, traj.pos_pts.size());
-      Eigen::VectorXd knots(traj.knots.size());
-      for (size_t j = 0; j < traj.knots.size(); ++j)
-      {
-        knots(j) = traj.knots[j];
-      }
-      for (size_t j = 0; j < traj.pos_pts.size(); ++j)
-      {
-        pos_pts(0, j) = traj.pos_pts[j].x;
-        pos_pts(1, j) = traj.pos_pts[j].y;
-        pos_pts(2, j) = traj.pos_pts[j].z;
-      }
-
-      buf[i].drone_id = i;
-
-      // 计算路径持续时间
-      if (traj.order % 2)
-      {
-        double cutback = (double)traj.order / 2 + 1.5;
-        buf[i].duration_ = traj.knots[traj.knots.size() - ceil(cutback)];
-      }
-      else
-      {
-        double cutback = (double)traj.order / 2 + 1.5;
-        buf[i].duration_ = (traj.knots[traj.knots.size() - floor(cutback)] + traj.knots[traj.knots.size() - ceil(cutback)]) / 2;
-      }
-
-      UniformBspline pos_traj(pos_pts, traj.order, traj.knots[1] - traj.knots[0]);
-      pos_traj.setKnot(knots);
-      buf[i].position_traj_ = pos_traj;
-
-      buf[i].start_pos_ = buf[i].position_traj_.evaluateDeBoorT(0);
-
-      buf[i].start_time_ = traj.start_time;
+      mergeSwarmTraj(i, traj, "Startup");
     }
 
     have_recv_pre_agent_ = true;
+  }
+
+  bool EGOReplanFSM::mergeSwarmTraj(size_t id, const traj_utils::msg::Bspline &traj, const char *source)
+  {
+    // SwarmDeck: a trajectory that is not live (a startup snapshot, or a
+    // broadcast kept from before odometry) only fills a missing entry or
+    // replaces an older one, and never clears the buffer.
+    SwarmTrajData &buf = planner_manager_->swarm_trajs_buf_;
+    if (buf.size() > id && buf[id].drone_id == (int)id &&
+        buf[id].start_time_.seconds() >= rclcpp::Time(traj.start_time).seconds())
+    {
+      RCLCPP_INFO(node_->get_logger(), "%s trajectory of drone %d is older than its live one: kept the live one.", source, (int)id);
+      return false;
+    }
+
+    Eigen::Vector3d cp0(traj.pos_pts[0].x, traj.pos_pts[0].y, traj.pos_pts[0].z);
+    Eigen::Vector3d cp1(traj.pos_pts[1].x, traj.pos_pts[1].y, traj.pos_pts[1].z);
+    Eigen::Vector3d cp2(traj.pos_pts[2].x, traj.pos_pts[2].y, traj.pos_pts[2].z);
+    Eigen::Vector3d swarm_start_pt = (cp0 + 4 * cp1 + cp2) / 6;
+    if ((swarm_start_pt - odom_pos_).norm() > planning_horizen_ * 4.0f / 3.0f)
+      return false;
+
+    for (size_t j = buf.size(); j <= id; j++)
+    {
+      OneTrajDataOfSwarm blank;
+      blank.drone_id = -1;
+      buf.push_back(blank);
+    }
+
+    // 存储路径控制点和节点
+    Eigen::MatrixXd pos_pts(3, traj.pos_pts.size());
+    Eigen::VectorXd knots(traj.knots.size());
+    for (size_t j = 0; j < traj.knots.size(); ++j)
+    {
+      knots(j) = traj.knots[j];
+    }
+    for (size_t j = 0; j < traj.pos_pts.size(); ++j)
+    {
+      pos_pts(0, j) = traj.pos_pts[j].x;
+      pos_pts(1, j) = traj.pos_pts[j].y;
+      pos_pts(2, j) = traj.pos_pts[j].z;
+    }
+
+    buf[id].drone_id = id;
+
+    // 计算路径持续时间
+    if (traj.order % 2)
+    {
+      double cutback = (double)traj.order / 2 + 1.5;
+      buf[id].duration_ = traj.knots[traj.knots.size() - ceil(cutback)];
+    }
+    else
+    {
+      double cutback = (double)traj.order / 2 + 1.5;
+      buf[id].duration_ = (traj.knots[traj.knots.size() - floor(cutback)] + traj.knots[traj.knots.size() - ceil(cutback)]) / 2;
+    }
+
+    UniformBspline pos_traj(pos_pts, traj.order, traj.knots[1] - traj.knots[0]);
+    pos_traj.setKnot(knots);
+    buf[id].position_traj_ = pos_traj;
+
+    buf[id].start_pos_ = buf[id].position_traj_.evaluateDeBoorT(0);
+
+    buf[id].start_time_ = traj.start_time;
+    return true;
   }
 
   void EGOReplanFSM::changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call)

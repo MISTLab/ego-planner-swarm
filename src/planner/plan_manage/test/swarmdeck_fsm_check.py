@@ -809,6 +809,35 @@ def predecessor_restart(s: Scenario) -> None:
     s.check(STARTUP_TIMEOUT_WARNING not in d1.log(), "drone 1 timed out")
 
 
+def idle_peer_learned_after_odometry(s: Scenario) -> None:
+    """Drone 1 announces itself (after its startup timeout) while drone 0 has
+    no odometry, then stays idle and never broadcasts again: drone 0 still
+    learns drone 1's trajectory on its first odometry."""
+    d0 = s.drone(0, start=(0.0, 0.0, 1.2))
+    d1 = s.drone(1, start=(0.0, 3.0, 1.2), extra_parameters={"fsm/sequential_start_timeout_s": 3.0})
+    heard: list[tuple[float, int]] = []
+    sub = s.harness.node.create_subscription(
+        Bspline, f"{d0.shared}/broadcast_bspline",
+        lambda msg: heard.append((s.harness.now(), msg.drone_id)), 10)
+    try:
+        if not s.check(d0.wait_ready() and d1.wait_ready(), "planners not up"):
+            return
+        d1.odom_enabled = True
+        s.check(wait_for(lambda: STARTUP_TIMEOUT_WARNING in d1.log(), 8.0), "drone 1 did not announce itself")
+        s.check(wait_for(lambda: any(i == 1 for _, i in heard), 2.0), "no broadcast from drone 1")
+        time.sleep(2.0)  # well past the 0.25 s freshness window of a live broadcast
+        d0.odom_enabled = True
+        learned = "Kept the trajectory of drone 1 received before odometry"
+        s.check(wait_for(lambda: learned in d0.log(), 5.0), "drone 0 did not learn drone 1")
+        time.sleep(1.0)
+        from_1 = [t for t, i in heard if i == 1]
+        s.note(f"drone 1 broadcast {len(from_1)} time(s); drone 0 learned it: {learned in d0.log()}")
+        s.check(len(from_1) == 1, f"drone 1 broadcast {len(from_1)} times, expected only its announcement")
+        s.check(d1.state() == "WAIT_TARGET" and not d1.bsplines, f"drone 1 not idle: {d1.state()}")
+    finally:
+        s.harness.node.destroy_subscription(sub)
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
@@ -820,6 +849,7 @@ SCENARIOS = {
     "blocked_start": blocked_start,
     "goal_changes_in_sequential_start": goal_changes_in_sequential_start,
     "predecessor_restart": predecessor_restart,
+    "idle_peer_learned_after_odometry": idle_peer_learned_after_odometry,
     "heartbeat": heartbeat,
 }
 

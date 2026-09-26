@@ -4,6 +4,7 @@
 #include <Eigen/Eigen>
 #include <algorithm>
 #include <iostream>
+#include <map>
 #include "nav_msgs/msg/path.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -78,6 +79,8 @@ namespace ego_planner
     double sequential_start_timeout_;
     rclcpp::Time first_odom_time_;
     std::shared_ptr<const traj_utils::msg::MultiBsplines> pending_swarm_trajs_;
+    /* SwarmDeck: the newest broadcast per peer received before odometry */
+    std::map<size_t, std::shared_ptr<const traj_utils::msg::Bspline>> early_broadcasts_;
 
     Eigen::Vector3d odom_pos_, odom_vel_, odom_acc_; // odometry state
     Eigen::Quaterniond odom_orient_;
@@ -136,6 +139,7 @@ namespace ego_planner
     void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry> &msg);
     void swarmTrajsCallback(const std::shared_ptr<const traj_utils::msg::MultiBsplines> &msg);
     void BroadcastBsplineCallback(const std::shared_ptr<const traj_utils::msg::Bspline> &msg);
+    bool mergeSwarmTraj(size_t id, const traj_utils::msg::Bspline &traj, const char *source);
 
     bool checkCollision();
     void publishSwarmTrajs(bool startup_pub);

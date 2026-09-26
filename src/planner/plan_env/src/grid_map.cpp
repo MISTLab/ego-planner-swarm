@@ -184,7 +184,7 @@ void GridMap::inputCloud(const vector<Eigen::Vector3d> &points, const Eigen::Vec
   md_.sensor_pos_ = sensor_origin;
   md_.points_.clear();
   for (const Eigen::Vector3d &point : points)
-    if (point.allFinite() && window_.contains(point))
+    if (point.allFinite())
       md_.points_.push_back(point);
   if (md_.points_.empty())
     return;
@@ -231,17 +231,25 @@ void GridMap::raycastProcess()
 
   for (Eigen::Vector3d pt_w : md_.points_)
   {
-    int vox_idx;
-    const double length = (pt_w - md_.sensor_pos_).norm();
-    if (length > mp_.max_ray_length_)
+    const Eigen::Vector3d ray = pt_w - md_.sensor_pos_;
+    const double length = ray.norm();
+    const bool hit = window_.contains(pt_w) && length <= mp_.max_ray_length_;
+    if (!hit)
     {
-      pt_w = (pt_w - md_.sensor_pos_) / length * mp_.max_ray_length_ + md_.sensor_pos_;
-      vox_idx = setCacheOccupancy(pt_w, 0);
+      // Returns beyond the window still observe free space. Clip the miss
+      // to the nearer of the ray limit and window edge, never adding a hit.
+      double fraction = length > 0.0 ? std::min(1.0, mp_.max_ray_length_ / length) : 0.0;
+      for (int axis = 0; axis < 3; ++axis)
+      {
+        if (ray(axis) > 0.0)
+          fraction = std::min(fraction, (window_.maxBound()(axis) - md_.sensor_pos_(axis)) / ray(axis));
+        else if (ray(axis) < 0.0)
+          fraction = std::min(fraction, (window_.minBound()(axis) - md_.sensor_pos_(axis)) / ray(axis));
+      }
+      // The maximum bound is exclusive; stay just inside for voxel indexing.
+      pt_w = md_.sensor_pos_ + ray * std::max(0.0, fraction - 1e-8);
     }
-    else
-    {
-      vox_idx = setCacheOccupancy(pt_w, 1);
-    }
+    int vox_idx = setCacheOccupancy(pt_w, hit ? 1 : 0);
     low = low.cwiseMin(pt_w);
     high = high.cwiseMax(pt_w);
 

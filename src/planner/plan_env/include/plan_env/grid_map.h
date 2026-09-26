@@ -39,7 +39,8 @@ using namespace std;
  * modulo the window (RollingWindow), whatever the mission size. Voxels
  * leaving the window are forgotten; everything outside it reads as blocked.
  * Input is the lidar cloud in the odometry frame with its sensor origin; only
- * points inside the window are fused, by ray casting into float log-odds.
+ * hits inside the window are fused; outside returns carve misses to the edge
+ * or ray limit, by ray casting into float log-odds.
  */
 
 struct MappingParameters

@@ -103,12 +103,25 @@ TEST_F(RollingGridMap, OutsideTheWindowIsBlockedAndInsideUnknownIsFree) {
   EXPECT_EQ(map->getInflateOccupancy(Eigen::Vector3d(1.5, 0.0, 0.0)), 0);
 }
 
-TEST_F(RollingGridMap, OnlyPointsInsideTheWindowAreFedIn) {
+TEST_F(RollingGridMap, OnlyHitsInsideTheWindowAreFedIn) {
   auto map = make();
   map->recenter(Eigen::Vector3d::Zero());
   observe(*map, Eigen::Vector3d(10.0, 0.05, 0.05));
-  EXPECT_TRUE(map->isUnknown(Eigen::Vector3d(1.05, 0.05, 0.05)));
+  EXPECT_FALSE(map->isUnknown(Eigen::Vector3d(1.05, 0.05, 0.05)));
+  EXPECT_FALSE(map->isUnknown(Eigen::Vector3d(1.95, 0.05, 0.05)));
+  EXPECT_EQ(map->getOccupancy(Eigen::Vector3d(1.95, 0.05, 0.05)), 0);
+  EXPECT_EQ(map->getOccupancy(Eigen::Vector3d(10.0, 0.05, 0.05)), -1);
   EXPECT_EQ(map->getInflateOccupancy(Eigen::Vector3d(1.95, 0.05, 0.05)), 0);
+}
+
+TEST_F(RollingGridMap, OutsideReturnsRespectRayLengthAndNegativeEdges) {
+  auto map = make();
+  observe(*map, Eigen::Vector3d(-10.0, 0.05, 0.05), Eigen::Vector3d(1.5, 0.05, 0.05));
+  EXPECT_FALSE(map->isUnknown(Eigen::Vector3d(-1.45, 0.05, 0.05)));
+  EXPECT_TRUE(map->isUnknown(Eigen::Vector3d(-1.75, 0.05, 0.05)));
+  observe(*map, Eigen::Vector3d(0.05, 0.05, -10.0));
+  EXPECT_FALSE(map->isUnknown(Eigen::Vector3d(0.05, 0.05, -0.95)));
+  EXPECT_EQ(map->getOccupancy(Eigen::Vector3d(0.05, 0.05, -0.95)), 0);
 }
 
 TEST_F(RollingGridMap, FreeSpaceIsCarvedUpToTheReturn) {

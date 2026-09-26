@@ -587,6 +587,36 @@ def lone_follower(s: Scenario) -> None:
     s.check(wait_for(lambda: d1.near(goal1, 0.3), 20.0), f"drone 1 at {d1.pos}, goal {goal1}")
 
 
+def state_gaps(d: Drone, start: float, end: float) -> list[float]:
+    stamps = [stamp for stamp, _ in d.states if start <= stamp <= end]
+    return [b - a for a, b in zip([start] + stamps, stamps + [end])]
+
+
+def heartbeat(s: Scenario) -> None:
+    """fsm_state comes at least once a second, idle and while planning fails."""
+    d = s.drone(0)
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 5.0), f"state {d.state()}")
+    start = s.harness.now()
+    time.sleep(5.0)
+    gaps = state_gaps(d, start, s.harness.now())
+    s.note(f"idle: {len(gaps) - 1} messages in 5 s, max gap {max(gaps):.2f} s")
+    s.check(max(gaps) <= 1.25, f"idle: fsm_state gap {max(gaps):.2f} s")
+
+    mark = len(d.log())
+    d.send_goal(3.0, 0.0, -4.0)  # below the map: planning fails once the drone nears the floor
+    start = s.harness.now()
+    time.sleep(8.0)
+    end = s.harness.now()
+    gaps = state_gaps(d, start, end)
+    failures = d.log()[mark:].count("refine_success=0")
+    s.note(f"failing plans: {failures} failures, {len(gaps) - 1} messages in 8 s, max gap {max(gaps):.2f} s")
+    s.check(failures > 0, "control: planning did not fail")
+    s.check(max(gaps) <= 1.25, f"while planning fails: fsm_state gap {max(gaps):.2f} s")
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
@@ -594,6 +624,7 @@ SCENARIOS = {
     "two_drones_staggered": two_drones_staggered,
     "follower_waits_for_leader": follower_waits_for_leader,
     "lone_follower": lone_follower,
+    "heartbeat": heartbeat,
 }
 
 

@@ -117,6 +117,9 @@ namespace ego_planner
     data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
     fsm_state_pub_ = node_->create_publisher<std_msgs::msg::String>(
         "planning/fsm_state", rclcpp::QoS(1).transient_local());
+    // SwarmDeck: the once-a-second state, on its own timer so planning time does not stretch it.
+    fsm_state_timer_ = node_->create_wall_timer(std::chrono::seconds(1),
+                                                std::bind(&EGOReplanFSM::publishFSMState, this));
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
     {
@@ -560,7 +563,6 @@ namespace ego_planner
     if (fsm_num == 100)
     {
       printFSMExecState();
-      publishFSMState();
       if (!have_odom_)
         cout << "no odom." << endl;
       if (!have_target_)

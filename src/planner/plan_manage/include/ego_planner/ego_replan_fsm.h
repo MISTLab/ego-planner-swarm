@@ -139,6 +139,7 @@ namespace ego_planner
 
     bool checkCollision();
     void publishSwarmTrajs(bool startup_pub);
+    void sendSwarmTrajs(const traj_utils::msg::Bspline &bspline, bool startup_pub);
     void publishStartupChain();
 
   public:

@@ -556,13 +556,23 @@ namespace ego_planner
     if (drone_id >= 0)
     {
       // A hover at the drone's pose; followers and peers get it, traj_server
-      // does not. It is built in the planner's trajectory, which is then
-      // restored: until the first real plan, nothing counts as flown, so the
+      // does not. It is built on its own, as EmergencyStop's spline (six equal
+      // control points, order 3, 1 s knot span), and never enters the planner's
+      // trajectory: until the first real plan nothing counts as flown, so the
       // safety check stays off.
-      const LocalTrajData flown = planner_manager_->local_data_;
-      planner_manager_->EmergencyStop(odom_pos_);
-      publishSwarmTrajs(true);
-      planner_manager_->local_data_ = flown;
+      traj_utils::msg::Bspline hover;
+      hover.order = 3;
+      hover.start_time = rclcpp::Clock().now();
+      hover.drone_id = drone_id;
+      hover.traj_id = 0;
+      geometry_msgs::msg::Point pt;
+      pt.x = odom_pos_(0);
+      pt.y = odom_pos_(1);
+      pt.z = odom_pos_(2);
+      hover.pos_pts.assign(6, pt);
+      for (int i = 0; i < (int)hover.pos_pts.size() + hover.order + 1; ++i)
+        hover.knots.push_back(double(i - hover.order) * 1.0);
+      sendSwarmTrajs(hover, true);
     }
     startup_published_ = true;
   }
@@ -960,6 +970,11 @@ namespace ego_planner
       bspline.knots.push_back(knots(i));
     }
 
+    sendSwarmTrajs(bspline, startup_pub);
+  }
+
+  void EGOReplanFSM::sendSwarmTrajs(const traj_utils::msg::Bspline &bspline, bool startup_pub)
+  {
     if (startup_pub)
     {
       // SwarmDeck: an absent predecessor leaves empty entries, which followers skip.

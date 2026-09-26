@@ -555,9 +555,14 @@ namespace ego_planner
 
     if (drone_id >= 0)
     {
-      // A hover at the drone's pose; followers and peers get it, traj_server does not.
+      // A hover at the drone's pose; followers and peers get it, traj_server
+      // does not. It is built in the planner's trajectory, which is then
+      // restored: until the first real plan, nothing counts as flown, so the
+      // safety check stays off.
+      const LocalTrajData flown = planner_manager_->local_data_;
       planner_manager_->EmergencyStop(odom_pos_);
       publishSwarmTrajs(true);
+      planner_manager_->local_data_ = flown;
     }
     startup_published_ = true;
   }

@@ -88,7 +88,7 @@ namespace ego_planner
     std::vector<Eigen::Vector3d> wps_;
     int current_wp_;
 
-    bool flag_escape_emergency_;
+    bool flag_escape_emergency_{true}; // SwarmDeck: the first emergency stop is published
 
     /* ROS utils */
     rclcpp::Node::SharedPtr node_;

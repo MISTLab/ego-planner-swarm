@@ -690,6 +690,30 @@ def handshake_keeps_live_peers(s: Scenario) -> None:
         chain0.close()
 
 
+def blocked_start(s: Scenario) -> None:
+    """A drone whose start is outside the map cannot plan its first trajectory:
+    it reports the failure and never flies, and its startup handshake is not
+    taken for a flown trajectory (no safety check, no emergency stop)."""
+    d = s.drone(0, start=(0.0, 0.0, 5.5))  # the map spans z -1 to 5
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 5.0), f"state {d.state()}")
+    time.sleep(1.0)
+    d.send_goal(10.0, 0.0, 1.5)
+    time.sleep(6.0)
+    log = d.log()
+    visited = sorted({state for _, state in d.states})
+    s.note(f"states {visited}, {log.count('refine_success=0')} failed plans, "
+           f"{len(d.bsplines)} trajectories, {d.commands} commands")
+    s.check(log.count("refine_success=0") > 0, "control: the first plan did not fail")
+    s.check("EMERGENCY_STOP" not in visited, "went to EMERGENCY_STOP before any flown trajectory")
+    s.check("[SAFETY]" not in log, "the safety check ran before any flown trajectory")
+    s.check(not d.bsplines, f"{len(d.bsplines)} trajectories sent to traj_server")
+    s.check(d.commands == 0, f"{d.commands} commands: the drone was flown")
+    s.check(d.state() == "GEN_NEW_TRAJ", f"state {d.state()}, expected GEN_NEW_TRAJ (failing)")
+
+
 SCENARIOS = {
     "early_goal": early_goal,
     "early_goal_cancel": early_goal_cancel,
@@ -698,6 +722,7 @@ SCENARIOS = {
     "follower_waits_for_leader": follower_waits_for_leader,
     "lone_follower": lone_follower,
     "handshake_keeps_live_peers": handshake_keeps_live_peers,
+    "blocked_start": blocked_start,
     "heartbeat": heartbeat,
 }
 

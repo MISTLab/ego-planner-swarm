@@ -734,8 +734,8 @@ def band_rejects_high_endpoint(s: Scenario) -> None:
     s.check(wait_for(lambda: bool(d.bsplines), 5.0), "in-band positive control did not plan")
 
 
-def band_drift_does_not_report_obstacle(s: Scenario) -> None:
-    """A 3 cm tracking excursion is not a physical occupied start."""
+def band_hover_drift_requests_retreat(s: Scenario) -> None:
+    """An odometry-start outside the band must escalate, then plan after retreat."""
     d = s.drone(0, start=(0.0, 0.0, 1.2), extra_parameters={
         "grid_map/flight_band_enabled": True,
         "fsm/report_occupied_start": True,
@@ -749,11 +749,56 @@ def band_drift_does_not_report_obstacle(s: Scenario) -> None:
     s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "no initial odometry")
     d.pos[2] = 2.23  # band top 2.2; preserve the initial ground reference
     time.sleep(0.5)
+    d.send_goal(4.0, 0.0, 1.6)
+    if not s.check(wait_for(lambda: d.state() == "OCCUPIED_START", 3.0),
+                   f"drifted hover did not request retreat: {d.state()}"):
+        return
+    s.check(len(d.bsplines) == 1 and is_stationary(d.bsplines[0][1]),
+            "occupied hover must publish just its stationary stop")
+    d.track_commands = False
+    d.cancel()
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "cancel not processed")
+    # Model the adapter's bounded back-off into its previously traversed band.
+    # The adapter callback/retreat integration is exercised in SwarmDeck tests.
+    for z in (2.03, 1.83):
+        d.pos[2] = z
+        time.sleep(0.2)
     since = s.harness.now()
     d.send_goal(4.0, 0.0, 1.6)
-    time.sleep(2.0)
+    s.check(wait_for(lambda: any(not is_stationary(msg) for msg in d.bsplines_since(since)), 5.0),
+            "free-start goal after retreat did not publish a trajectory")
+    d.track_commands = True
+    s.check(wait_for(lambda: d.near((4.0, 0.0, 1.6), 0.3), 12.0),
+            f"did not reach the goal after retreat: {d.pos}")
+
+
+def band_tracking_drift_keeps_replanning(s: Scenario) -> None:
+    """Tracking drift uses the in-band trajectory start, and must keep flying."""
+    d = s.drone(0, start=(0.0, 0.0, 1.2), extra_parameters={
+        "grid_map/flight_band_enabled": True,
+        "fsm/report_occupied_start": True,
+        "grid_map/base_height": 1.2,
+        "grid_map/flight_band_min": 0.0,
+        "grid_map/flight_band_max": 1.0,
+    })
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "no initial odometry")
+    d.send_goal(7.0, 0.0, 1.6)
+    if not s.check(wait_for(lambda: d.state() == "EXEC_TRAJ" and bool(d.bsplines), 5.0),
+                   "initial in-band trajectory not published"):
+        return
+    d.track_commands = False
+    d.pos[2] = 2.23
+    since = s.harness.now()
+    s.check(wait_for(lambda: any(not is_stationary(msg) for msg in d.bsplines_since(since)), 3.0),
+            "tracking drift did not publish a replanned trajectory")
     s.check(d.reached_state("OCCUPIED_START", since) is None,
-            "small band drift was treated as an occupied start")
+            "tracking drift was treated as an occupied odometry start")
+    d.track_commands = True
+    s.check(wait_for(lambda: d.near((7.0, 0.0, 1.6), 0.3), 15.0),
+            f"tracking drift never recovered: {d.pos}")
 
 
 def occupied_start(s: Scenario) -> None:
@@ -957,7 +1002,8 @@ SCENARIOS = {
     "blocked_start": blocked_start,
     "occupied_start": occupied_start,
     "band_rejects_high_endpoint": band_rejects_high_endpoint,
-    "band_drift_does_not_report_obstacle": band_drift_does_not_report_obstacle,
+    "band_hover_drift_requests_retreat": band_hover_drift_requests_retreat,
+    "band_tracking_drift_keeps_replanning": band_tracking_drift_keeps_replanning,
     "goal_changes_in_sequential_start": goal_changes_in_sequential_start,
     "predecessor_restart": predecessor_restart,
     "idle_peer_learned_after_odometry": idle_peer_learned_after_odometry,

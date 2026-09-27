@@ -395,3 +395,14 @@ TEST_F(GroundRelativeBand, RejectsOccupiedVoxelsDuringTheRecoveryPrefix) {
   FlightBandTrajectoryCheck check(*map);
   EXPECT_FALSE(check.accept({1.05, 0.05, 2.65}, 0.0, false));
 }
+
+TEST_F(GroundRelativeBand, LeavesInBandOccupancyToUpstreamCollisionChecks) {
+  auto map = band();
+  const Eigen::Vector3d occupied(1.05, 0.05, 1.65);
+  observe(*map, occupied);
+  ASSERT_EQ(map->getInflateOccupancy(occupied), 1);
+  FlightBandTrajectoryCheck check(*map);
+  EXPECT_TRUE(check.accept({0.05, 0.05, 1.65}, 0.0, false));
+  EXPECT_TRUE(check.accept(occupied, 1.0, false));
+  EXPECT_TRUE(check.accept(occupied, 2.0, true));
+}

@@ -16,13 +16,15 @@ public:
   {
     double low, high;
     if (!map_.flightBandLimits(point, low, high)) return true;
-    if (map_.getInflateOccupancy(point, 0.1) != 0) return false;
     const double violation = std::max({low - point.z(), point.z() - high, 0.0});
     if (violation == 0.0)
     {
       recovering_ = false;
       return true;
     }
+    // Only the recovery fringe gets an extra occupancy check. In-band
+    // collision checks retain EGO's upstream prefix/replanning policy.
+    if (map_.getInflateOccupancy(point, 0.1) != 0) return false;
     if (!recovering_ || endpoint || time > 0.5 ||
         violation > previous_violation_ + 1e-9)
       return false;

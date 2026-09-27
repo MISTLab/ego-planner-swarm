@@ -801,6 +801,37 @@ def band_tracking_drift_keeps_replanning(s: Scenario) -> None:
             f"tracking drift never recovered: {d.pos}")
 
 
+def band_goal_past_corner(s: Scenario) -> None:
+    """An in-band tail may clip a corner; upstream replanning must reach the goal."""
+    d = s.drone(0, start=(0.0, 0.0, 1.2), extra_parameters={
+        "grid_map/flight_band_enabled": True,
+        "fsm/report_occupied_start": True,
+        "grid_map/base_height": 1.2,
+        "grid_map/flight_band_min": 0.0,
+        "grid_map/flight_band_max": 1.0,
+    })
+    # The inside corner is near the straight-line tail, not the initial prefix.
+    # It spans the flight band so the drone must go around, not over/under it.
+    ys, zs = np.meshgrid(np.arange(0.25, 2.01, 0.1), np.arange(1.0, 2.51, 0.1))
+    xs, z2 = np.meshgrid(np.arange(3.55, 4.51, 0.1), np.arange(1.0, 2.51, 0.1))
+    corner = np.vstack([
+        np.column_stack([np.full(ys.size, 3.55), ys.ravel(), zs.ravel()]),
+        np.column_stack([xs.ravel(), np.full(xs.size, 2.0), z2.ravel()]),
+    ])
+    d.cloud_points = np.vstack([CLOUD_POINTS, corner]).astype("<f4")
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "no initial odometry")
+    time.sleep(1.0)  # establish occupied voxels before planning
+    d.send_goal(4.0, 0.0, 1.6)
+    s.check(wait_for(lambda: d.near((4.0, 0.0, 1.6), 0.3), 15.0),
+            f"did not reach the goal past the corner: {d.pos}, {d.state()}")
+    s.check(len(d.bsplines) > 1, "corner route did not replan")
+    s.check(d.reached_state("OCCUPIED_START") is None, "corner traversal requested retreat")
+    s.note(f"corner goal reached at {d.pos}; {len(d.bsplines)} trajectories")
+
+
 def occupied_start(s: Scenario) -> None:
     """An inflated occupied start holds, reports why, and awaits external retreat."""
     d = s.drone(0, extra_parameters={"fsm/report_occupied_start": True})
@@ -1001,6 +1032,7 @@ SCENARIOS = {
     "handshake_keeps_live_peers": handshake_keeps_live_peers,
     "blocked_start": blocked_start,
     "occupied_start": occupied_start,
+    "band_goal_past_corner": band_goal_past_corner,
     "band_rejects_high_endpoint": band_rejects_high_endpoint,
     "band_hover_drift_requests_retreat": band_hover_drift_requests_retreat,
     "band_tracking_drift_keeps_replanning": band_tracking_drift_keeps_replanning,

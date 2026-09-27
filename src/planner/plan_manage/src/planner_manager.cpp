@@ -329,6 +329,27 @@ namespace ego_planner
     // t_refine = ros::Time::now() - t_start;
     t_refine = rclcpp::Clock().now() - t_start;
 
+    // The rebound optimizer checks only a prefix and may move its terminal
+    // controls. A ground-relative band is a flight constraint, including the
+    // tail and endpoint, not merely a cost. Do not replace the current local
+    // trajectory with a rejected candidate (the safety timer still uses it).
+    double band_low, band_high;
+    if (grid_map_->flightBandLimits(start_pt, band_low, band_high))
+    {
+      const double duration = pos.getTimeSum();
+      const int samples = std::max(1, int(std::ceil(duration / 0.01)));
+      for (int i = 0; i <= samples; ++i)
+      {
+        const Eigen::Vector3d point = pos.evaluateDeBoorT(duration * i / samples);
+        grid_map_->flightBandLimits(point, band_low, band_high);
+        if (point.z() < band_low || point.z() > band_high)
+        {
+          continous_failures_count_++;
+          return false;
+        }
+      }
+    }
+
     // save planned results
     updateTrajInfo(pos, rclcpp::Clock().now());
 

@@ -725,7 +725,7 @@ def band_rejects_high_endpoint(s: Scenario) -> None:
         return
     d.odom_enabled = True
     time.sleep(0.5)
-    d.send_goal(2.0, 0.0, 3.5)
+    d.send_goal(7.6, 0.32, 2.22)
     time.sleep(3.0)
     s.check(not d.bsplines, "published a trajectory to an out-of-band endpoint")
 

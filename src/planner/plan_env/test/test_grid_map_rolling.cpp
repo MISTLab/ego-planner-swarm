@@ -13,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "plan_env/grid_map.h"
+#include "plan_env/flight_band_check.h"
 
 namespace {
 
@@ -345,4 +346,52 @@ TEST_F(GroundRelativeBand, ShaftAndUnseenColumnsKeepLastKnownLevel) {
   map->recenter({40.05, 0.05, 2.32});
   EXPECT_EQ(map->getInflateOccupancy({40.05, 0.05, 3.4}), 0);
   EXPECT_EQ(map->getInflateOccupancy({40.05, 0.05, 1.8}), 1);
+}
+
+TEST_F(GroundRelativeBand, GroundIsTheObservedVoxelsTopSurface) {
+  auto map = band();
+  observe(*map, {1.05, 0.05, 0.05});
+  double low, high;
+  ASSERT_TRUE(map->flightBandLimits({1.05, 0.05, 1.5}, low, high));
+  EXPECT_NEAR(low, 0.1 + 0.8 + 0.12, 1e-9);
+  EXPECT_NEAR(high, 0.1 + 2.5 + 0.12, 1e-9);
+}
+
+TEST_F(GroundRelativeBand, PoseToleranceNeverUnblocksRealOccupancy) {
+  auto map = band();
+  const Eigen::Vector3d drift(1.05, 0.05, 2.65); // upper band 2.62
+  EXPECT_EQ(map->getInflateOccupancy(drift), 1);
+  EXPECT_EQ(map->getInflateOccupancy(drift, 0.1), 0);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 2.73}, 0.1), 1);
+  observe(*map, drift);
+  EXPECT_EQ(map->getInflateOccupancy(drift, 0.1), 1);
+}
+
+TEST_F(GroundRelativeBand, AcceptsOnlyARecoveringInitialBandPrefix) {
+  auto map = band();
+  FlightBandTrajectoryCheck check(*map);
+  EXPECT_TRUE(check.accept({1.05, 0.05, 2.65}, 0.0, false));
+  EXPECT_TRUE(check.accept({1.05, 0.05, 2.64}, 0.1, false));
+  EXPECT_TRUE(check.accept({1.05, 0.05, 2.61}, 0.3, false));
+  EXPECT_TRUE(check.accept({1.05, 0.05, 2.5}, 1.0, true));
+  // Once inside, even a 1 cm excursion is forbidden.
+  EXPECT_FALSE(check.accept({1.05, 0.05, 2.63}, 1.1, false));
+}
+
+TEST_F(GroundRelativeBand, RejectsEscapingAndOverduePrefixesAndOutsideEndpoints) {
+  auto map = band();
+  FlightBandTrajectoryCheck escaping(*map), overdue(*map), endpoint(*map);
+  ASSERT_TRUE(escaping.accept({1.05, 0.05, 2.65}, 0.0, false));
+  EXPECT_FALSE(escaping.accept({1.05, 0.05, 2.66}, 0.1, false));
+  ASSERT_TRUE(overdue.accept({1.05, 0.05, 2.65}, 0.0, false));
+  EXPECT_FALSE(overdue.accept({1.05, 0.05, 2.64}, 0.51, false));
+  ASSERT_TRUE(endpoint.accept({1.05, 0.05, 2.65}, 0.0, false));
+  EXPECT_FALSE(endpoint.accept({1.05, 0.05, 2.64}, 0.2, true));
+}
+
+TEST_F(GroundRelativeBand, RejectsOccupiedVoxelsDuringTheRecoveryPrefix) {
+  auto map = band();
+  observe(*map, {1.05, 0.05, 2.65});
+  FlightBandTrajectoryCheck check(*map);
+  EXPECT_FALSE(check.accept({1.05, 0.05, 2.65}, 0.0, false));
 }

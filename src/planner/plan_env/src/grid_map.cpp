@@ -258,7 +258,7 @@ double GridMap::columnGround(const Eigen::Vector3d &pos)
   for (int z = window_.maxIndex().z(); z >= window_.minIndex().z(); --z)
   {
     id.z() = z;
-    const double height = window_.centerOf(id).z();
+    const double height = window_.centerOf(id).z() + mp_.resolution_ / 2.0;
     if (height >= underside) continue;
     if (height < bottom) break;
     if (md_.occupancy_buffer_[window_.address(id)] > mp_.min_occupancy_log_)

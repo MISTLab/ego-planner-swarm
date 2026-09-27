@@ -647,7 +647,7 @@ namespace ego_planner
     // a free prefix inside an obstacle. Yield to an external, bounded retreat;
     // never move the spline's start to a fictitious nearest free cell.
     if (report_occupied_start_ && have_odom_ && have_target_ &&
-        planner_manager_->grid_map_->getInflateOccupancy(odom_pos_) != 0)
+        planner_manager_->grid_map_->getInflateOccupancy(odom_pos_, 0.1) != 0)
     {
       callEmergencyStop(odom_pos_);
       publishSwarmTrajs(false);

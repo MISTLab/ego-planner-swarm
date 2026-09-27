@@ -728,6 +728,32 @@ def band_rejects_high_endpoint(s: Scenario) -> None:
     d.send_goal(7.6, 0.32, 2.22)
     time.sleep(3.0)
     s.check(not d.bsplines, "published a trajectory to an out-of-band endpoint")
+    d.cancel()
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "cancel not processed")
+    d.send_goal(4.0, 0.0, 1.6)
+    s.check(wait_for(lambda: bool(d.bsplines), 5.0), "in-band positive control did not plan")
+
+
+def band_drift_does_not_report_obstacle(s: Scenario) -> None:
+    """A 3 cm tracking excursion is not a physical occupied start."""
+    d = s.drone(0, start=(0.0, 0.0, 1.2), extra_parameters={
+        "grid_map/flight_band_enabled": True,
+        "fsm/report_occupied_start": True,
+        "grid_map/base_height": 1.2,
+        "grid_map/flight_band_min": 0.0,
+        "grid_map/flight_band_max": 1.0,
+    })
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "no initial odometry")
+    d.pos[2] = 2.23  # band top 2.2; preserve the initial ground reference
+    time.sleep(0.5)
+    since = s.harness.now()
+    d.send_goal(4.0, 0.0, 1.6)
+    time.sleep(2.0)
+    s.check(d.reached_state("OCCUPIED_START", since) is None,
+            "small band drift was treated as an occupied start")
 
 
 def occupied_start(s: Scenario) -> None:
@@ -931,6 +957,7 @@ SCENARIOS = {
     "blocked_start": blocked_start,
     "occupied_start": occupied_start,
     "band_rejects_high_endpoint": band_rejects_high_endpoint,
+    "band_drift_does_not_report_obstacle": band_drift_does_not_report_obstacle,
     "goal_changes_in_sequential_start": goal_changes_in_sequential_start,
     "predecessor_restart": predecessor_restart,
     "idle_peer_learned_after_odometry": idle_peer_learned_after_odometry,

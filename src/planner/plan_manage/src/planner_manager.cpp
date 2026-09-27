@@ -1,5 +1,6 @@
 // #include <fstream>
 #include <ego_planner/planner_manager.h>
+#include <plan_env/flight_band_check.h>
 #include <thread>
 #include "visualization_msgs/msg/marker.hpp" // zx-todo
 
@@ -336,13 +337,14 @@ namespace ego_planner
     double band_low, band_high;
     if (grid_map_->flightBandLimits(start_pt, band_low, band_high))
     {
+      FlightBandTrajectoryCheck band_check(*grid_map_);
       const double duration = pos.getTimeSum();
       const int samples = std::max(1, int(std::ceil(duration / 0.01)));
       for (int i = 0; i <= samples; ++i)
       {
-        const Eigen::Vector3d point = pos.evaluateDeBoorT(duration * i / samples);
-        grid_map_->flightBandLimits(point, band_low, band_high);
-        if (point.z() < band_low || point.z() > band_high)
+        const double time = duration * i / samples;
+        const Eigen::Vector3d point = pos.evaluateDeBoorT(time);
+        if (!band_check.accept(point, time, i == samples))
         {
           continous_failures_count_++;
           return false;

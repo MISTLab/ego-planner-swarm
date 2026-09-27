@@ -103,7 +103,8 @@ public:
   Eigen::Vector3d windowMin() const { return window_.minBound(); }
   Eigen::Vector3d windowMax() const { return window_.maxBound(); }
 
-  inline int getInflateOccupancy(Eigen::Vector3d pos);
+  // The optional tolerance relaxes only the flight band, never real occupancy.
+  inline int getInflateOccupancy(Eigen::Vector3d pos, double band_tolerance = 0.0);
   inline int getOccupancy(Eigen::Vector3d pos);
   /** Base-link z limits over observed ground; false when the band is disabled. */
   bool flightBandLimits(const Eigen::Vector3d &pos, double &low, double &high);
@@ -167,13 +168,14 @@ private:
   rclcpp::TimerBase::SharedPtr vis_timer_;
 };
 
-inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos)
+inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double band_tolerance)
 {
   const Eigen::Vector3i id = window_.indexOf(pos);
   if (!window_.contains(id))
     return -1;
   double low, high;
-  if (flightBandLimits(pos, low, high) && (pos.z() < low || pos.z() > high))
+  if (flightBandLimits(pos, low, high) &&
+      (pos.z() < low - band_tolerance || pos.z() > high + band_tolerance))
     return 1;
   return int(md_.occupancy_buffer_inflate_[window_.address(id)]);
 }

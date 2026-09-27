@@ -20,6 +20,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <visualization_msgs/msg/marker.hpp>
 
 #include <pcl/point_cloud.h>
@@ -54,6 +55,8 @@ struct MappingParameters
   float unknown_flag_;
   double max_ray_length_;
   double virtual_ceil_height_;
+  bool flight_band_enabled_;
+  double flight_band_min_, flight_band_max_, base_height_;
   double visualization_truncate_height_;
   double sensor_timeout_;
 };
@@ -102,6 +105,8 @@ public:
 
   inline int getInflateOccupancy(Eigen::Vector3d pos);
   inline int getOccupancy(Eigen::Vector3d pos);
+  /** Base-link z limits over observed ground; false when the band is disabled. */
+  bool flightBandLimits(const Eigen::Vector3d &pos, double &low, double &high);
   inline bool isInMap(const Eigen::Vector3d &pos);
   inline bool isInMap(const Eigen::Vector3i &idx);
   inline bool isUnknown(const Eigen::Vector3d &pos);
@@ -134,6 +139,19 @@ private:
   void clearAndInflateLocalMap();
   void inflateBox(const Eigen::Vector3i &min_id, const Eigen::Vector3i &max_id);
 
+  double columnGround(const Eigen::Vector3d &pos);
+  void updateGroundReference();
+
+  // Lazily scan each column at most once per map/odometry update. Cached
+  // values wrap with the window and are invalidated before any cell reuse.
+  vector<double> column_ground_;
+  vector<uint64_t> column_ground_generation_;
+  uint64_t ground_generation_ = 1;
+  Eigen::Vector3d drone_pos_ = Eigen::Vector3d::Zero();
+  bool have_ground_reference_ = false;
+  double last_ground_ = 0.0;
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr flight_band_pub_;
+
   MappingParameters mp_;
   MappingData md_;
   RollingWindow window_;
@@ -154,6 +172,9 @@ inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos)
   const Eigen::Vector3i id = window_.indexOf(pos);
   if (!window_.contains(id))
     return -1;
+  double low, high;
+  if (flightBandLimits(pos, low, high) && (pos.z() < low || pos.z() > high))
+    return 1;
   return int(md_.occupancy_buffer_inflate_[window_.address(id)]);
 }
 

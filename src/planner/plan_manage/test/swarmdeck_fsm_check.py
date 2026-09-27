@@ -188,6 +188,8 @@ class Drone:
         self.pos = list(start)
         self.vel = [0.0, 0.0, 0.0]
         self.odom_enabled = False
+        self.cloud_points = CLOUD_POINTS
+        self.track_commands = True
         self.states: list[tuple[float, str]] = []
         self.bsplines: list[tuple[float, Bspline]] = []
         self.broadcasts: list[tuple[float, Bspline]] = []
@@ -291,6 +293,8 @@ class Drone:
     def on_command(self, msg: PositionCommand) -> None:
         self.commands += 1
         self.track.append([msg.position.x, msg.position.y, msg.position.z])
+        if not self.track_commands:
+            return
         self.pos = [msg.position.x, msg.position.y, msg.position.z]
         self.vel = [msg.velocity.x, msg.velocity.y, msg.velocity.z]
 
@@ -311,12 +315,12 @@ class Drone:
         cloud = PointCloud2()
         cloud.header.stamp = self.harness.node.get_clock().now().to_msg()
         cloud.header.frame_id = f"{self.robot}/odom"
-        cloud.height, cloud.width = 1, len(CLOUD_POINTS)
+        cloud.height, cloud.width = 1, len(self.cloud_points)
         cloud.fields = CLOUD_FIELDS
         cloud.is_bigendian = False
-        cloud.point_step, cloud.row_step = 12, 12 * len(CLOUD_POINTS)
+        cloud.point_step, cloud.row_step = 12, 12 * len(self.cloud_points)
         cloud.is_dense = True
-        cloud.data = CLOUD_POINTS.tobytes()
+        cloud.data = self.cloud_points.tobytes()
         self.cloud_pub.publish(cloud)
         origin = PointStamped()
         origin.header = cloud.header
@@ -708,6 +712,51 @@ def handshake_keeps_live_peers(s: Scenario) -> None:
         chain0.close()
 
 
+def band_rejects_high_endpoint(s: Scenario) -> None:
+    """The optimizer's checked prefix must not admit an out-of-band tail."""
+    d = s.drone(0, start=(0.0, 0.0, 1.2), extra_parameters={
+        "grid_map/flight_band_enabled": True,
+        # First odometry here is airborne: explicitly known 1.2 m offset.
+        "grid_map/base_height": 1.2,
+        "grid_map/flight_band_min": 0.0,
+        "grid_map/flight_band_max": 1.0,
+    })
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    time.sleep(0.5)
+    d.send_goal(2.0, 0.0, 3.5)
+    time.sleep(3.0)
+    s.check(not d.bsplines, "published a trajectory to an out-of-band endpoint")
+
+
+def occupied_start(s: Scenario) -> None:
+    """An inflated occupied start holds, reports why, and awaits external retreat."""
+    d = s.drone(0, extra_parameters={"fsm/report_occupied_start": True})
+    d.cloud_points = np.array([[0.15, 0.0, 1.2]], dtype="<f4")
+    if not s.check(d.wait_ready(), "planner not up"):
+        return
+    d.odom_enabled = True
+    time.sleep(2.0)
+    d.send_goal(3.0, 0.0, 1.2)
+    s.check(wait_for(lambda: d.state() == "OCCUPIED_START", 5.0), f"state {d.state()}")
+    count = len(d.bsplines)
+    time.sleep(1.5)
+    s.check(len(d.bsplines) == count == 1, "occupied start must publish one hover only")
+    s.check(d.near((0.0, 0.0, 1.2), 0.01), f"teleported start: {d.pos}")
+    s.check("the drone is in obstacle" not in d.log(), "optimizer retried occupied prefix")
+    d.cancel()
+    s.check(wait_for(lambda: d.state() == "WAIT_TARGET", 2.0), "cancel did not clear occupied state")
+    # External adapter backs off; EGO must not overwrite that motion or resume
+    # the old goal. Only a new explicit goal may restart planning.
+    d.track_commands = False
+    d.pos = [-1.0, 0.0, 1.2]
+    time.sleep(0.5)
+    s.check(d.state() == "WAIT_TARGET", "resumed without a new goal")
+    d.send_goal(-3.0, 0.0, 1.2)
+    s.check(wait_for(lambda: d.state() == "EXEC_TRAJ", 5.0), "new free-start goal not planned")
+
+
 def blocked_start(s: Scenario) -> None:
     """A drone with a goal beyond a small window cannot plan its first trajectory:
     it reports the failure and never flies, and its startup handshake is not
@@ -880,6 +929,8 @@ SCENARIOS = {
     "lone_follower": lone_follower,
     "handshake_keeps_live_peers": handshake_keeps_live_peers,
     "blocked_start": blocked_start,
+    "occupied_start": occupied_start,
+    "band_rejects_high_endpoint": band_rejects_high_endpoint,
     "goal_changes_in_sequential_start": goal_changes_in_sequential_start,
     "predecessor_restart": predecessor_restart,
     "idle_peer_learned_after_odometry": idle_peer_learned_after_odometry,

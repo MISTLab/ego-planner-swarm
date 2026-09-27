@@ -282,3 +282,67 @@ TEST_F(RollingGridMap, DefaultWindowDiagonalRecenterTiming) {
 }
 
 }  // namespace
+
+class GroundRelativeBand : public RollingGridMap {
+ protected:
+  GridMap::Ptr band() {
+    rclcpp::NodeOptions options;
+    options.parameter_overrides({
+        {"grid_map/window_size_x", 8.0}, {"grid_map/window_size_y", 8.0},
+        {"grid_map/window_size_z", 12.0}, {"grid_map/p_hit", 0.9},
+        {"grid_map/max_ray_length", 10.0}, {"grid_map/flight_band_enabled", true},
+        {"grid_map/flight_band_min", 0.8}, {"grid_map/flight_band_max", 2.5},
+        {"grid_map/base_height", 0.12}});
+    node_ = std::make_shared<rclcpp::Node>("band_test_" + std::to_string(next_node_++), options);
+    auto map = std::make_shared<GridMap>(); map->initMap(node_);
+    // The first odometry is on known ground (base height 0.12).
+    map->recenter({0.05, 0.05, 0.12});
+    map->recenter({0.05, 0.05, 1.32});
+    return map;
+  }
+};
+
+TEST_F(GroundRelativeBand, BlocksWholeHalfSpacesNotJustOneCeilingVoxel) {
+  auto map = band();
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 0.8}), 1);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 1.5}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 2.7}), 1);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 5.0}), 1);
+}
+
+TEST_F(GroundRelativeBand, FollowsObservedRampAndSeparateLevels) {
+  auto map = band();
+  map->recenter({0.05, 0.05, 2.32});
+  observe(*map, {1.05, 0.05, 0.55}, {0.05, 0.05, 2.32});
+  observe(*map, {2.05, 0.05, 1.05}, {0.05, 0.05, 2.32});
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 1.3}), 1);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 2.8}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({2.05, 0.05, 1.8}), 1);
+  EXPECT_EQ(map->getInflateOccupancy({2.05, 0.05, 3.4}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({2.05, 0.05, 3.8}), 1);
+}
+
+TEST_F(GroundRelativeBand, UsesDeckAboveLowerFloorAndIgnoresCeiling) {
+  auto map = band();
+  observe(*map, {1.05, 0.05, -1.05});
+  observe(*map, {1.05, 0.05, 0.05});
+  observe(*map, {1.05, 0.05, 3.05});
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 2.0}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 0.85}), 1);
+  EXPECT_EQ(map->getInflateOccupancy({1.05, 0.05, 2.8}), 1);
+}
+
+TEST_F(GroundRelativeBand, ShaftAndUnseenColumnsKeepLastKnownLevel) {
+  auto map = band();
+  map->recenter({0.05, 0.05, 2.32});
+  observe(*map, {0.05, 0.05, 1.05}, {0.05, 0.05, 2.32});
+  // Establish the current column, then move over a drop deeper than 3 m.
+  map->recenter({0.05, 0.05, 2.32});
+  observe(*map, {2.05, 0.05, -2.05}, {0.05, 0.05, 2.32});
+  map->recenter({2.05, 0.05, 2.32});
+  EXPECT_EQ(map->getInflateOccupancy({2.05, 0.05, 3.4}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({2.05, 0.05, 1.8}), 1);
+  map->recenter({40.05, 0.05, 2.32});
+  EXPECT_EQ(map->getInflateOccupancy({40.05, 0.05, 3.4}), 0);
+  EXPECT_EQ(map->getInflateOccupancy({40.05, 0.05, 1.8}), 1);
+}

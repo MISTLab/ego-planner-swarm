@@ -41,7 +41,8 @@ namespace ego_planner
       REPLAN_TRAJ,
       EXEC_TRAJ,
       EMERGENCY_STOP,
-      SEQUENTIAL_START
+      SEQUENTIAL_START,
+      OCCUPIED_START
     };
     enum TARGET_TYPE
     {
@@ -66,6 +67,7 @@ namespace ego_planner
     bool flag_realworld_experiment_;
     bool enable_fail_safe_;
     bool configured_fail_safe_;
+    bool report_occupied_start_;
 
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;

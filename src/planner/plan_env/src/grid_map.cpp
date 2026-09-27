@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace
 {
@@ -32,6 +34,10 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   node_->declare_parameter("grid_map/p_occ", 0.80);
   node_->declare_parameter("grid_map/max_ray_length", 8.0);
   node_->declare_parameter("grid_map/virtual_ceil_height", -1.0);
+  node_->declare_parameter("grid_map/flight_band_enabled", false);
+  node_->declare_parameter("grid_map/flight_band_min", 0.8);
+  node_->declare_parameter("grid_map/flight_band_max", 2.5);
+  node_->declare_parameter("grid_map/base_height", 0.12);
   node_->declare_parameter("grid_map/visualization_truncate_height", 100.0);
   node_->declare_parameter("grid_map/frame_id", std::string("world"));
   node_->declare_parameter("grid_map/odom_depth_timeout", 1.0);
@@ -48,6 +54,15 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   node_->get_parameter("grid_map/p_occ", mp_.p_occ_);
   node_->get_parameter("grid_map/max_ray_length", mp_.max_ray_length_);
   node_->get_parameter("grid_map/virtual_ceil_height", mp_.virtual_ceil_height_);
+  node_->get_parameter("grid_map/flight_band_enabled", mp_.flight_band_enabled_);
+  node_->get_parameter("grid_map/flight_band_min", mp_.flight_band_min_);
+  node_->get_parameter("grid_map/flight_band_max", mp_.flight_band_max_);
+  node_->get_parameter("grid_map/base_height", mp_.base_height_);
+  if (mp_.flight_band_enabled_ &&
+      (!std::isfinite(mp_.flight_band_min_) || !std::isfinite(mp_.flight_band_max_) ||
+       !std::isfinite(mp_.base_height_) || mp_.flight_band_min_ < 0.0 ||
+       mp_.flight_band_max_ <= mp_.flight_band_min_ || mp_.base_height_ < 0.0))
+    throw std::invalid_argument("invalid ground-relative flight band");
   node_->get_parameter("grid_map/visualization_truncate_height", mp_.visualization_truncate_height_);
   node_->get_parameter("grid_map/frame_id", mp_.frame_id_);
   node_->get_parameter("grid_map/odom_depth_timeout", mp_.sensor_timeout_);
@@ -64,6 +79,13 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
     voxels(i) = std::max(1, int(std::ceil(mp_.window_size_(i) / mp_.resolution_ - 1e-9)));
   window_ = RollingWindow(mp_.resolution_, voxels);
 
+  if (mp_.flight_band_enabled_)
+  {
+    column_ground_.resize(voxels.x() * voxels.y());
+    column_ground_generation_.assign(column_ground_.size(), 0);
+    flight_band_pub_ = node_->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "grid_map/flight_band", 10);
+  }
   const std::size_t cells = window_.cells();
   md_.occupancy_buffer_.assign(cells, mp_.clamp_min_log_ - mp_.unknown_flag_);
   md_.occupancy_buffer_inflate_.assign(cells, 0);
@@ -97,6 +119,13 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   vis_timer_ = node_->create_wall_timer(std::chrono::milliseconds(110), [this]() {
     publishMapInflate(true);
     publishMap();
+    double low, high;
+    if (flightBandLimits(drone_pos_, low, high))
+    {
+      std_msgs::msg::Float64MultiArray band;
+      band.data = {low, high};
+      flight_band_pub_->publish(band);
+    }
   });
 
   map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("grid_map/occupancy", 10);
@@ -135,6 +164,19 @@ void GridMap::recenter(const Eigen::Vector3d &pos)
     }
   md_.local_bound_min_ = window_.clamp(md_.local_bound_min_);
   md_.local_bound_max_ = window_.clamp(md_.local_bound_max_);
+  if (mp_.flight_band_enabled_)
+  {
+    drone_pos_ = pos;
+    if (!have_ground_reference_)
+    {
+      // Deployment starts on known ground. Subsequent levels come from lidar,
+      // never from an airborne restart's guessed absolute world height.
+      last_ground_ = pos.z() - mp_.base_height_;
+      have_ground_reference_ = true;
+    }
+    ++ground_generation_;
+    updateGroundReference();
+  }
 }
 
 void GridMap::resetBox(const Eigen::Vector3i &min_id, const Eigen::Vector3i &max_id)
@@ -194,6 +236,55 @@ void GridMap::inputCloud(const vector<Eigen::Vector3d> &points, const Eigen::Vec
   if (md_.local_updated_)
     clearAndInflateLocalMap();
   md_.local_updated_ = false;
+  if (mp_.flight_band_enabled_)
+  {
+    ++ground_generation_;
+    updateGroundReference();
+  }
+}
+
+double GridMap::columnGround(const Eigen::Vector3d &pos)
+{
+  Eigen::Vector3i id = window_.indexOf(pos);
+  id.z() = window_.minIndex().z();
+  if (!window_.contains(id))
+    return std::numeric_limits<double>::quiet_NaN();
+  const std::size_t column = window_.address(id) / window_.size().z();
+  if (column_ground_generation_[column] == ground_generation_)
+    return column_ground_[column];
+  double ground = std::numeric_limits<double>::quiet_NaN();
+  const double underside = drone_pos_.z() - mp_.base_height_;
+  const double bottom = underside - mp_.flight_band_max_ - 0.5;
+  for (int z = window_.maxIndex().z(); z >= window_.minIndex().z(); --z)
+  {
+    id.z() = z;
+    const double height = window_.centerOf(id).z();
+    if (height >= underside) continue;
+    if (height < bottom) break;
+    if (md_.occupancy_buffer_[window_.address(id)] > mp_.min_occupancy_log_)
+    {
+      ground = height;
+      break; // nearest observed surface below, not a lower storey's floor
+    }
+  }
+  column_ground_generation_[column] = ground_generation_;
+  return column_ground_[column] = ground;
+}
+
+void GridMap::updateGroundReference()
+{
+  const double ground = columnGround(drone_pos_);
+  if (std::isfinite(ground)) last_ground_ = ground;
+}
+
+bool GridMap::flightBandLimits(const Eigen::Vector3d &pos, double &low, double &high)
+{
+  if (!mp_.flight_band_enabled_ || !have_ground_reference_) return false;
+  const double observed = columnGround(pos);
+  const double ground = std::isfinite(observed) ? observed : last_ground_;
+  low = ground + mp_.flight_band_min_ + mp_.base_height_;
+  high = ground + mp_.flight_band_max_ + mp_.base_height_;
+  return true;
 }
 
 void GridMap::checkSensorTimeout()

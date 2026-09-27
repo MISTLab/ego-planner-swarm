@@ -23,6 +23,7 @@ namespace ego_planner
     node_->declare_parameter("fsm/emergency_time", 1.0);
     node_->declare_parameter("fsm/realworld_experiment", false);
     node_->declare_parameter("fsm/fail_safe", true);
+    node_->declare_parameter("fsm/report_occupied_start", false);
     node_->declare_parameter("fsm/sequential_start_timeout_s", 10.0);
 
     node_->get_parameter("fsm/flight_type", target_type_);
@@ -34,6 +35,7 @@ namespace ego_planner
     node_->get_parameter("fsm/realworld_experiment", flag_realworld_experiment_);
     node_->get_parameter("fsm/fail_safe", enable_fail_safe_);
     configured_fail_safe_ = enable_fail_safe_;
+    node_->get_parameter("fsm/report_occupied_start", report_occupied_start_);
     node_->get_parameter("fsm/sequential_start_timeout_s", sequential_start_timeout_);
 
     have_trigger_ = !flag_realworld_experiment_;
@@ -538,7 +540,7 @@ namespace ego_planner
     else
       continously_called_times_ = 1;
 
-    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START"};
+    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
@@ -553,14 +555,14 @@ namespace ego_planner
 
   void EGOReplanFSM::printFSMExecState()
   {
-    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START"};
+    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
 
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
 
   void EGOReplanFSM::publishFSMState()
   {
-    static const string state_str[7] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START"};
+    static const string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
     std_msgs::msg::String msg;
     msg.data = state_str[int(exec_state_)];
     fsm_state_pub_->publish(msg);
@@ -641,6 +643,19 @@ namespace ego_planner
 
     publishStartupChain();
 
+    // The optimizer fixes the starting control points: it cannot manufacture
+    // a free prefix inside an obstacle. Yield to an external, bounded retreat;
+    // never move the spline's start to a fictitious nearest free cell.
+    if (report_occupied_start_ && have_odom_ && have_target_ &&
+        planner_manager_->grid_map_->getInflateOccupancy(odom_pos_) != 0)
+    {
+      callEmergencyStop(odom_pos_);
+      publishSwarmTrajs(false);
+      have_target_ = false;
+      have_pending_goal_ = false;
+      changeFSMExecState(OCCUPIED_START, "OCCUPIED_START");
+    }
+
     switch (exec_state_)
     {
     case INIT:
@@ -652,6 +667,9 @@ namespace ego_planner
       changeFSMExecState(WAIT_TARGET, "FSM");
       break;
     }
+
+    case OCCUPIED_START:
+      break; // cancellation or a new goal after external recovery only
 
     case WAIT_TARGET:
     {

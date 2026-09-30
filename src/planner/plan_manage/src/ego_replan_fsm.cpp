@@ -1,6 +1,7 @@
 
 #include <cmath>
 #include <ego_planner/ego_replan_fsm.h>
+#include <ego_planner/trajectory_publication_check.h>
 
 namespace ego_planner
 {
@@ -14,6 +15,12 @@ namespace ego_planner
     have_target_ = false;
     have_odom_ = false;
     have_recv_pre_agent_ = false;
+
+    node_->declare_parameter("fsm/ordered_commands", false);
+    node_->get_parameter("fsm/ordered_commands", ordered_commands_);
+    input_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions input_options;
+    input_options.callback_group = input_group_;
 
     node_->declare_parameter("fsm/flight_type", -1);
     node_->declare_parameter("fsm/thresh_replan_time", -1.0);
@@ -76,8 +83,9 @@ namespace ego_planner
         1,
         [this](const std::shared_ptr<const nav_msgs::msg::Odometry> &msg)
         {
-          this->odometryCallback(msg);
-        });
+          std::lock_guard<std::mutex> guard(input_mutex_);
+          latest_odom_ = msg;
+        }, input_options);
     // std::bind(&EGOReplanFSM::odometryCallback, this, std::placeholders::_1));
 
     if (planner_manager_->pp_.drone_id >= 1)
@@ -119,7 +127,9 @@ namespace ego_planner
     data_disp_pub_ = node_->create_publisher<traj_utils::msg::DataDisp>("planning/data_display", 100);
     fsm_state_pub_ = node_->create_publisher<std_msgs::msg::String>(
         "planning/fsm_state", rclcpp::QoS(1).transient_local());
-    // SwarmDeck: the once-a-second state, on its own timer so planning time does not stretch it.
+    command_state_pub_ = node_->create_publisher<traj_utils::msg::CommandState>(
+        "planning/command_state", rclcpp::QoS(100).transient_local());
+    // State publication belongs to the planning owner: identity and state agree.
     fsm_state_timer_ = node_->create_wall_timer(std::chrono::seconds(1),
                                                 std::bind(&EGOReplanFSM::publishFSMState, this));
 
@@ -135,20 +145,32 @@ namespace ego_planner
 
     if (target_type_ == TARGET_TYPE::MANUAL_TARGET)
     {
-      waypoint_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
-          "goal",
-          1,
-          [this](const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg)
-          {
-            this->waypointCallback(msg);
-          });
-      cancel_sub_ = node_->create_subscription<std_msgs::msg::Empty>(
-          "cancel",
-          1,
-          [this](const std::shared_ptr<const std_msgs::msg::Empty> &msg)
-          {
-            this->cancelCallback(msg);
-          });
+      if (ordered_commands_)
+      {
+        command_sub_ = node_->create_subscription<traj_utils::msg::PlannerCommand>(
+            "command", rclcpp::QoS(rclcpp::KeepAll()).reliable(),
+            [this](traj_utils::msg::PlannerCommand::ConstSharedPtr msg) { receiveCommand(*msg); }, input_options);
+      }
+      else
+      {
+        // Legacy messages have no shared publication sequence. Compatibility
+        // mode preserves receipt order only; never mix it with ordered input.
+        waypoint_sub_ = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+            "goal", rclcpp::QoS(rclcpp::KeepAll()).reliable(),
+            [this](geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
+              traj_utils::msg::PlannerCommand command;
+              command.command = traj_utils::msg::PlannerCommand::GOAL;
+              command.goal = *msg;
+              receiveCommand(command);
+            }, input_options);
+        cancel_sub_ = node_->create_subscription<std_msgs::msg::Empty>(
+            "cancel", rclcpp::QoS(rclcpp::KeepAll()).reliable(),
+            [this](std_msgs::msg::Empty::ConstSharedPtr) {
+              traj_utils::msg::PlannerCommand command;
+              command.command = traj_utils::msg::PlannerCommand::CANCEL;
+              receiveCommand(command);
+            }, input_options);
+      }
     }
     else if (target_type_ == TARGET_TYPE::PRESET_TARGET)
     {
@@ -180,6 +202,53 @@ namespace ego_planner
     }
     else
       cout << "Wrong target_type_ value! target_type_=" << target_type_ << endl;
+  }
+
+  void EGOReplanFSM::receiveCommand(const traj_utils::msg::PlannerCommand &command)
+  {
+    using Command = traj_utils::msg::PlannerCommand;
+    if (command.command != Command::GOAL && command.command != Command::CANCEL)
+      return;
+    const auto &p = command.goal.pose.position;
+    if (command.command == Command::GOAL &&
+        (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)))
+      return;
+    std::lock_guard<std::mutex> guard(input_mutex_);
+    if (ordered_commands_ && command.sequence <= received_sequence_)
+      return;
+    received_sequence_ = ordered_commands_ ? command.sequence : received_sequence_ + 1;
+    commands_.push_back(command);
+  }
+
+  bool EGOReplanFSM::commandsPending()
+  {
+    std::lock_guard<std::mutex> guard(input_mutex_);
+    return !commands_.empty();
+  }
+
+  void EGOReplanFSM::drainInputs()
+  {
+    std::deque<traj_utils::msg::PlannerCommand> commands;
+    nav_msgs::msg::Odometry::ConstSharedPtr odom;
+    {
+      std::lock_guard<std::mutex> guard(input_mutex_);
+      commands.swap(commands_);
+      odom.swap(latest_odom_);
+    }
+    if (odom) odometryCallback(odom);
+    for (const auto &command : commands)
+    {
+      command_sequence_ = command.sequence;
+      if (command.command == traj_utils::msg::PlannerCommand::GOAL)
+      {
+        goal_sequence_ = command.sequence;
+        waypointCallback(std::make_shared<geometry_msgs::msg::PoseStamped>(command.goal));
+      }
+      else
+        cancelCallback(nullptr);
+      // Emit even if a new goal leaves the FSM in the same state.
+      publishFSMState();
+    }
   }
 
   void EGOReplanFSM::readGivenWps()
@@ -566,6 +635,11 @@ namespace ego_planner
     std_msgs::msg::String msg;
     msg.data = state_str[int(exec_state_)];
     fsm_state_pub_->publish(msg);
+    traj_utils::msg::CommandState attributed;
+    attributed.command_sequence = command_sequence_;
+    attributed.goal_sequence = goal_sequence_;
+    attributed.state = msg.data;
+    command_state_pub_->publish(attributed);
   }
 
   void EGOReplanFSM::cancelCallback(const std::shared_ptr<const std_msgs::msg::Empty> &)
@@ -628,6 +702,7 @@ namespace ego_planner
   void EGOReplanFSM::execFSMCallback()
   {
     exec_timer_->cancel(); // To avoid blockage
+    drainInputs();
 
     static int fsm_num = 0;
     fsm_num++;
@@ -828,7 +903,7 @@ namespace ego_planner
     else
       flag_random_poly_init = true;
 
-    for (int i = 0; i < trial_times; i++)
+    for (int i = 0; i < trial_times && !commandsPending(); i++)
     {
       if (callReboundReplan(true, flag_random_poly_init))
       {
@@ -876,6 +951,7 @@ namespace ego_planner
 
   void EGOReplanFSM::checkCollisionCallback()
   {
+    drainInputs();
 
     LocalTrajData *info = &planner_manager_->local_data_;
     auto map = planner_manager_->grid_map_;
@@ -960,8 +1036,9 @@ namespace ego_planner
 
   bool EGOReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
   {
-
+    if (commandsPending()) return false;
     getLocalTarget();
+    const auto previous_trajectory = planner_manager_->local_data_;
 
     bool plan_and_refine_success =
         planner_manager_->reboundReplan(start_pt_, start_vel_, start_acc_, local_target_pt_, local_target_vel_, (have_new_target_ || flag_use_poly_init), flag_randomPolyTraj);
@@ -971,7 +1048,20 @@ namespace ego_planner
 
     if (plan_and_refine_success)
     {
-
+      // Fusion can proceed throughout optimization. Only this final check and
+      // publication see a locked map; restore the flown trajectory on rejection.
+      auto map_guard = planner_manager_->grid_map_->lock();
+      if (!trajectoryPublicationSafe(*planner_manager_->grid_map_, planner_manager_->local_data_.position_traj_))
+      {
+        planner_manager_->local_data_ = previous_trajectory;
+        return false;
+      }
+      std::lock_guard<std::mutex> input_guard(input_mutex_);
+      if (!commands_.empty())
+      {
+        planner_manager_->local_data_ = previous_trajectory;
+        return false;
+      }
       auto info = &planner_manager_->local_data_;
 
       traj_utils::msg::Bspline bspline;

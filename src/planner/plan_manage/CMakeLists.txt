@@ -92,4 +92,13 @@ install(
   DESTINATION share/${PROJECT_NAME}/launch
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(message_filters REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  ament_add_gtest(test_trajectory_publication_check test/test_trajectory_publication_check.cpp)
+  ament_target_dependencies(test_trajectory_publication_check
+    rclcpp plan_env bspline_opt nav_msgs geometry_msgs sensor_msgs visualization_msgs message_filters pcl_conversions)
+endif()
+
 ament_package()

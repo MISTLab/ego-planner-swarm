@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <string>
 #include <vector>
@@ -94,14 +95,21 @@ public:
 
   void initMap(rclcpp::Node::SharedPtr node);
 
+  // Fusion/recentering and individual planner queries are atomic. A caller
+  // may retain this recursive lock for a consistent final trajectory check,
+  // never for the optimizer itself (which would starve sensing again).
+  std::unique_lock<std::recursive_mutex> lock() const
+  { return std::unique_lock<std::recursive_mutex>(mutex_); }
+  rclcpp::CallbackGroup::SharedPtr callbackGroup() const { return callback_group_; }
+
   /** Centre the window on the drone; voxels leaving it are forgotten. */
   void recenter(const Eigen::Vector3d &pos);
   /** Fuse one scan: points in the odometry frame, cast from `sensor_origin`. */
   void inputCloud(const vector<Eigen::Vector3d> &points, const Eigen::Vector3d &sensor_origin);
 
   std::size_t bufferCells() const { return window_.cells(); }
-  Eigen::Vector3d windowMin() const { return window_.minBound(); }
-  Eigen::Vector3d windowMax() const { return window_.maxBound(); }
+  Eigen::Vector3d windowMin() const { auto guard = lock(); return window_.minBound(); }
+  Eigen::Vector3d windowMax() const { auto guard = lock(); return window_.maxBound(); }
 
   // The optional tolerance relaxes only the flight band, never real occupancy.
   inline int getInflateOccupancy(Eigen::Vector3d pos, double band_tolerance = 0.0);
@@ -115,9 +123,9 @@ public:
   inline void indexToPos(const Eigen::Vector3i &id, Eigen::Vector3d &pos);
   inline double getResolution();
 
-  bool odomValid() { return md_.has_odom_; }
+  bool odomValid() { auto guard = lock(); return md_.has_odom_; }
   /** True while no lidar cloud has arrived for grid_map/odom_depth_timeout s */
-  bool getOdomDepthTimeout() { return md_.flag_sensor_timeout_; }
+  bool getOdomDepthTimeout() { auto guard = lock(); return md_.flag_sensor_timeout_; }
 
   void publishMap();
   void publishMapInflate(bool all_info = false);
@@ -125,6 +133,8 @@ public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
 private:
+  mutable std::recursive_mutex mutex_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
   typedef message_filters::sync_policies::ExactTime<sensor_msgs::msg::PointCloud2,
                                                     geometry_msgs::msg::PointStamped>
       SyncPolicyCloudOrigin;
@@ -170,6 +180,7 @@ private:
 
 inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double band_tolerance)
 {
+  auto guard = lock();
   const Eigen::Vector3i id = window_.indexOf(pos);
   if (!window_.contains(id))
     return -1;
@@ -182,18 +193,20 @@ inline int GridMap::getInflateOccupancy(Eigen::Vector3d pos, double band_toleran
 
 inline int GridMap::getOccupancy(Eigen::Vector3d pos)
 {
+  auto guard = lock();
   const Eigen::Vector3i id = window_.indexOf(pos);
   if (!window_.contains(id))
     return -1;
   return md_.occupancy_buffer_[window_.address(id)] > mp_.min_occupancy_log_ ? 1 : 0;
 }
 
-inline bool GridMap::isInMap(const Eigen::Vector3d &pos) { return window_.contains(pos); }
+inline bool GridMap::isInMap(const Eigen::Vector3d &pos) { auto guard = lock(); return window_.contains(pos); }
 
-inline bool GridMap::isInMap(const Eigen::Vector3i &idx) { return window_.contains(idx); }
+inline bool GridMap::isInMap(const Eigen::Vector3i &idx) { auto guard = lock(); return window_.contains(idx); }
 
 inline bool GridMap::isUnknown(const Eigen::Vector3d &pos)
 {
+  auto guard = lock();
   const Eigen::Vector3i id = window_.indexOf(pos);
   if (!window_.contains(id))
     return true;
@@ -202,11 +215,13 @@ inline bool GridMap::isUnknown(const Eigen::Vector3d &pos)
 
 inline void GridMap::posToIndex(const Eigen::Vector3d &pos, Eigen::Vector3i &id)
 {
+  auto guard = lock();
   id = window_.indexOf(pos);
 }
 
 inline void GridMap::indexToPos(const Eigen::Vector3i &id, Eigen::Vector3d &pos)
 {
+  auto guard = lock();
   pos = window_.centerOf(id);
 }
 

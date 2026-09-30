@@ -27,6 +27,8 @@ rosidl_generate_interfaces(traj_utils
   "msg/Bspline.msg"
   "msg/DataDisp.msg"
   "msg/MultiBsplines.msg"
+  "msg/PlannerCommand.msg"
+  "msg/CommandState.msg"
 
   DEPENDENCIES std_msgs geometry_msgs rclcpp builtin_interfaces
 )

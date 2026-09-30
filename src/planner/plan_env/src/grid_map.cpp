@@ -103,20 +103,24 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
   md_.local_bound_min_ = window_.minIndex();
   md_.local_bound_max_ = window_.minIndex();
 
+  callback_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+  rclcpp::SubscriptionOptions sensing_options;
+  sensing_options.callback_group = callback_group_;
   odom_sub_ = node_->create_subscription<nav_msgs::msg::Odometry>(
-      "grid_map/odom", 10, std::bind(&GridMap::odomCallback, this, std::placeholders::_1));
+      "grid_map/odom", 10, std::bind(&GridMap::odomCallback, this, std::placeholders::_1), sensing_options);
   cloud_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::PointCloud2>>(
-      node_, "grid_map/cloud", rclcpp::QoS(10).get_rmw_qos_profile());
+      node_, "grid_map/cloud", rclcpp::QoS(10).get_rmw_qos_profile(), sensing_options);
   origin_sub_ = std::make_shared<message_filters::Subscriber<geometry_msgs::msg::PointStamped>>(
-      node_, "grid_map/cloud_origin", rclcpp::QoS(10).get_rmw_qos_profile());
+      node_, "grid_map/cloud_origin", rclcpp::QoS(10).get_rmw_qos_profile(), sensing_options);
   sync_cloud_origin_ = std::make_shared<message_filters::Synchronizer<SyncPolicyCloudOrigin>>(
       SyncPolicyCloudOrigin(20), *cloud_sub_, *origin_sub_);
   sync_cloud_origin_->registerCallback(
       std::bind(&GridMap::cloudOriginCallback, this, std::placeholders::_1, std::placeholders::_2));
 
   timeout_timer_ = node_->create_wall_timer(std::chrono::milliseconds(50),
-                                            std::bind(&GridMap::checkSensorTimeout, this));
+                                            std::bind(&GridMap::checkSensorTimeout, this), callback_group_);
   vis_timer_ = node_->create_wall_timer(std::chrono::milliseconds(110), [this]() {
+    auto guard = lock();
     publishMapInflate(true);
     publishMap();
     double low, high;
@@ -126,7 +130,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
       band.data = {low, high};
       flight_band_pub_->publish(band);
     }
-  });
+  }, callback_group_);
 
   map_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("grid_map/occupancy", 10);
   map_inf_pub_ = node_->create_publisher<sensor_msgs::msg::PointCloud2>("grid_map/occupancy_inflate", 10);
@@ -137,6 +141,7 @@ void GridMap::initMap(rclcpp::Node::SharedPtr node)
 
 void GridMap::recenter(const Eigen::Vector3d &pos)
 {
+  auto guard = lock();
   const Eigen::Vector3i old_min = window_.minIndex();
   const Eigen::Vector3i old_max = window_.maxIndex();
   const auto entered = window_.recenter(pos);
@@ -197,6 +202,7 @@ void GridMap::resetBox(const Eigen::Vector3i &min_id, const Eigen::Vector3i &max
 
 void GridMap::odomCallback(const nav_msgs::msg::Odometry::SharedPtr odom)
 {
+  auto guard = lock();
   const auto &p = odom->pose.pose.position;
   if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
     return;
@@ -220,6 +226,7 @@ void GridMap::cloudOriginCallback(const sensor_msgs::msg::PointCloud2::ConstShar
 
 void GridMap::inputCloud(const vector<Eigen::Vector3d> &points, const Eigen::Vector3d &sensor_origin)
 {
+  auto guard = lock();
   md_.has_cloud_ = true;
   md_.last_cloud_ = std::chrono::steady_clock::now();
   md_.flag_sensor_timeout_ = false;
@@ -279,6 +286,7 @@ void GridMap::updateGroundReference()
 
 bool GridMap::flightBandLimits(const Eigen::Vector3d &pos, double &low, double &high)
 {
+  auto guard = lock();
   if (!mp_.flight_band_enabled_ || !have_ground_reference_) return false;
   const double observed = columnGround(pos);
   const double ground = std::isfinite(observed) ? observed : last_ground_;
@@ -289,6 +297,7 @@ bool GridMap::flightBandLimits(const Eigen::Vector3d &pos, double &low, double &
 
 void GridMap::checkSensorTimeout()
 {
+  auto guard = lock();
   if (!md_.has_cloud_ && !md_.has_odom_)
     return;
   const double gap =
@@ -459,6 +468,7 @@ void GridMap::inflateBox(const Eigen::Vector3i &clear_min, const Eigen::Vector3i
 
 void GridMap::publishMap()
 {
+  auto guard = lock();
   if (map_pub_->get_subscription_count() <= 0)
     return;
   pcl::PointCloud<pcl::PointXYZ> cloud;
@@ -485,6 +495,7 @@ void GridMap::publishMap()
 
 void GridMap::publishMapInflate(bool all_info)
 {
+  auto guard = lock();
   if (map_inf_pub_->get_subscription_count() <= 0)
     return;
   const Eigen::Vector3i low = all_info ? window_.minIndex() : md_.local_bound_min_;

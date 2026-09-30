@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <iostream>
 #include <map>
+#include <deque>
+#include <mutex>
+#include "traj_utils/msg/planner_command.hpp"
+#include "traj_utils/msg/command_state.hpp"
 #include "nav_msgs/msg/path.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "sensor_msgs/msg/imu.hpp"
@@ -95,6 +99,20 @@ namespace ego_planner
 
     bool flag_escape_emergency_{true}; // SwarmDeck: the first emergency stop is published
 
+    // Only the default (planning) callback group owns FSM/optimizer state.
+    // The input executor only appends commands and replaces the odometry inbox.
+    std::mutex input_mutex_;
+    std::deque<traj_utils::msg::PlannerCommand> commands_;
+    nav_msgs::msg::Odometry::ConstSharedPtr latest_odom_;
+    uint64_t received_sequence_{0}, command_sequence_{0}, goal_sequence_{0};
+    bool ordered_commands_{false};
+    rclcpp::CallbackGroup::SharedPtr input_group_;
+    rclcpp::Subscription<traj_utils::msg::PlannerCommand>::SharedPtr command_sub_;
+    rclcpp::Publisher<traj_utils::msg::CommandState>::SharedPtr command_state_pub_;
+    void receiveCommand(const traj_utils::msg::PlannerCommand &command);
+    void drainInputs();
+    bool commandsPending();
+
     /* ROS utils */
     rclcpp::Node::SharedPtr node_;
     rclcpp::TimerBase::SharedPtr exec_timer_, safety_timer_;
@@ -158,6 +176,8 @@ namespace ego_planner
     }
 
     void init(rclcpp::Node::SharedPtr &node);
+    rclcpp::CallbackGroup::SharedPtr inputGroup() const { return input_group_; }
+    rclcpp::CallbackGroup::SharedPtr sensingGroup() const { return planner_manager_->grid_map_->callbackGroup(); }
 
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   };

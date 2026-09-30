@@ -99,6 +99,19 @@ if(BUILD_TESTING)
   ament_add_gtest(test_trajectory_publication_check test/test_trajectory_publication_check.cpp)
   ament_target_dependencies(test_trajectory_publication_check
     rclcpp plan_env bspline_opt nav_msgs geometry_msgs sensor_msgs visualization_msgs message_filters pcl_conversions)
+
+  # Test the real FSM with a deterministic optimizer-result interleaving,
+  # without adding injection hooks or exposing private state in production.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND UNIX AND NOT APPLE)
+    ament_add_gtest(test_safety_command_preemption
+      test/test_safety_command_preemption.cpp src/ego_replan_fsm.cpp src/planner_manager.cpp)
+    target_compile_options(test_safety_command_preemption PRIVATE -fno-access-control)
+    ament_target_dependencies(test_safety_command_preemption
+      rclcpp std_msgs nav_msgs visualization_msgs geometry_msgs quadrotor_msgs
+      plan_env path_searching bspline_opt traj_utils cv_bridge pcl_conversions)
+    target_link_libraries(test_safety_command_preemption ${TRAJ_UTILS_LIB}
+      "-Wl,--wrap=_ZN11ego_planner17EGOPlannerManager13reboundReplanEN5Eigen6MatrixIdLi3ELi1ELi0ELi3ELi1EEES3_S3_S3_S3_bb")
+  endif()
 endif()
 
 ament_package()

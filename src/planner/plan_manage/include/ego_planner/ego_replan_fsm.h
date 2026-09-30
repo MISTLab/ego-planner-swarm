@@ -134,10 +134,10 @@ namespace ego_planner
     rclcpp::Publisher<traj_utils::msg::Bspline>::SharedPtr broadcast_bspline_pub_;
 
     /* helper functions */
-    bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj); // front-end and back-end method
+    bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj, bool preemptible = true);
     bool callEmergencyStop(Eigen::Vector3d stop_pos);                          // front-end and back-end method
     bool planFromGlobalTraj(const int trial_times = 1);
-    bool planFromCurrentTraj(const int trial_times = 1);
+    bool planFromCurrentTraj(const int trial_times = 1, bool preemptible = true);
 
     /* return value: std::pair< Times of the same state be continuously called, current continuously called state > */
     void changeFSMExecState(FSM_EXEC_STATE new_state, string pos_call);

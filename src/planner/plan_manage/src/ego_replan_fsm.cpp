@@ -282,6 +282,21 @@ namespace ego_planner
 
   void EGOReplanFSM::planNextWaypoint(const Eigen::Vector3d next_wp)
   {
+    if (planner_manager_->grid_map_->getOdomDepthTimeout())
+    {
+      // Acknowledge the newest goal, but never leave the stop to plan on a
+      // stale map. Both legacy and ordered goals resume after fresh sensing.
+      pending_goal_ = next_wp;
+      have_pending_goal_ = true;
+      enable_fail_safe_ = false;
+      if (exec_state_ != EMERGENCY_STOP || flag_escape_emergency_)
+        callEmergencyStop(odom_pos_);
+      flag_escape_emergency_ = false;
+      if (exec_state_ != EMERGENCY_STOP)
+        changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+      return;
+    }
+    have_pending_goal_ = false;
     bool success = false;
     success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), next_wp, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
 
@@ -390,7 +405,7 @@ namespace ego_planner
       early_broadcasts_.clear();
     }
 
-    if (have_pending_goal_)
+    if (have_pending_goal_ && !planner_manager_->grid_map_->getOdomDepthTimeout())
     {
       have_pending_goal_ = false;
       init_pt_ = odom_pos_;
@@ -703,6 +718,11 @@ namespace ego_planner
   {
     exec_timer_->cancel(); // To avoid blockage
     drainInputs();
+    if (have_odom_ && have_pending_goal_ && !planner_manager_->grid_map_->getOdomDepthTimeout())
+    {
+      init_pt_ = odom_pos_;
+      planNextWaypoint(pending_goal_);
+    }
 
     static int fsm_num = 0;
     fsm_num++;
@@ -913,7 +933,7 @@ namespace ego_planner
     return false;
   }
 
-  bool EGOReplanFSM::planFromCurrentTraj(const int trial_times /*=1*/)
+  bool EGOReplanFSM::planFromCurrentTraj(const int trial_times /*=1*/, bool preemptible /*=true*/)
   {
 
     LocalTrajData *info = &planner_manager_->local_data_;
@@ -926,16 +946,16 @@ namespace ego_planner
     start_vel_ = info->velocity_traj_.evaluateDeBoorT(t_cur);
     start_acc_ = info->acceleration_traj_.evaluateDeBoorT(t_cur);
 
-    bool success = callReboundReplan(false, false);
+    bool success = callReboundReplan(false, false, preemptible);
 
     if (!success)
     {
-      success = callReboundReplan(true, false);
+      success = callReboundReplan(true, false, preemptible);
       if (!success)
       {
         for (int i = 0; i < trial_times; i++)
         {
-          success = callReboundReplan(true, true);
+          success = callReboundReplan(true, true, preemptible);
           if (success)
             break;
         }
@@ -965,7 +985,12 @@ namespace ego_planner
       RCLCPP_ERROR(node_->get_logger(), "Depth Lost! EMERGENCY_STOP");
 
       enable_fail_safe_ = false;
-      changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+      if (exec_state_ != EMERGENCY_STOP || flag_escape_emergency_)
+        callEmergencyStop(odom_pos_);
+      flag_escape_emergency_ = false;
+      if (exec_state_ != EMERGENCY_STOP)
+        changeFSMExecState(EMERGENCY_STOP, "SAFETY");
+      return; // local_data_ now holds the stop, not the trajectory below
     }
 
     /* ---------- check trajectory ---------- */
@@ -1008,7 +1033,8 @@ namespace ego_planner
       if (occ)
       {
 
-        if (planFromCurrentTraj()) // Make a chance
+        // A queued goal must not discard the escape from a known collision.
+        if (planFromCurrentTraj(1, false)) // Make a chance
         {
           changeFSMExecState(EXEC_TRAJ, "SAFETY");
           publishSwarmTrajs(false);
@@ -1020,6 +1046,10 @@ namespace ego_planner
           {
             RCLCPP_WARN(node_->get_logger(), "Suddenly discovered obstacles. emergency stop! time=%f", t - t_cur);
 
+            // Send the stop now: the next exec tick drains queued goals
+            // before its state switch and could otherwise erase this stop.
+            callEmergencyStop(odom_pos_);
+            flag_escape_emergency_ = false;
             changeFSMExecState(EMERGENCY_STOP, "SAFETY");
           }
           else
@@ -1034,9 +1064,9 @@ namespace ego_planner
     }
   }
 
-  bool EGOReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj)
+  bool EGOReplanFSM::callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj, bool preemptible)
   {
-    if (commandsPending()) return false;
+    if (preemptible && commandsPending()) return false;
     getLocalTarget();
     const auto previous_trajectory = planner_manager_->local_data_;
 
@@ -1051,13 +1081,14 @@ namespace ego_planner
       // Fusion can proceed throughout optimization. Only this final check and
       // publication see a locked map; restore the flown trajectory on rejection.
       auto map_guard = planner_manager_->grid_map_->lock();
-      if (!trajectoryPublicationSafe(*planner_manager_->grid_map_, planner_manager_->local_data_.position_traj_))
+      if (planner_manager_->grid_map_->getOdomDepthTimeout() ||
+          !trajectoryPublicationSafe(*planner_manager_->grid_map_, planner_manager_->local_data_.position_traj_))
       {
         planner_manager_->local_data_ = previous_trajectory;
         return false;
       }
       std::lock_guard<std::mutex> input_guard(input_mutex_);
-      if (!commands_.empty())
+      if (preemptible && !commands_.empty())
       {
         planner_manager_->local_data_ = previous_trajectory;
         return false;

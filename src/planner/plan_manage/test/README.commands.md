@@ -43,10 +43,13 @@ Three mutually-exclusive callback groups run on three dedicated single-thread
 executors: default/FSM/optimizer; map sensing/fusion/visualization; command and
 odometry intake. Commands enter a mutex-protected FIFO, odometry a latest-value
 inbox. Only the planning owner applies them, before its execution/safety
-callbacks. Pending commands stop obsolete retries at attempt boundaries and
-suppress obsolete candidate publication. No whole-plan lock blocks intake or
-fusion. State heartbeats remain planning-owned and can wait for an attempt;
-identities make late states unambiguous.
+callbacks. Pending commands stop ordinary obsolete retries at attempt boundaries
+and suppress ordinary obsolete candidate publication. Collision-safety replans
+are never command-preemptible: a safe result is published even with commands
+pending. If safety replanning fails for an imminent collision, the safety callback
+publishes a stop immediately, before a queued goal can overwrite its state.
+No whole-plan lock blocks intake or fusion. State heartbeats remain planning-owned
+and can wait for an attempt; identities make late states unambiguous.
 
 GridMap's mutable occupancy, rolling bounds, ground-column caches, and sensor
 timeout state are protected by a recursive mutex. Each public query and map
@@ -55,8 +58,13 @@ upstream closest-2/3 occupancy check and existing full-tail flight-band check,
 then publishes; rejected candidates restore the prior local trajectory. The
 existing 50 ms in-flight collision/replanning timer is retained. It remains
 serialized with the optimizer, as before; updates after publication are caught
-on its next callback. There is no change to inflation, A*, optimizer costs,
-ceiling/recovery tolerances, or the upstream unchecked obstacle-tail policy.
+on its next callback. Lidar timeout publishes an immediate stop too. Goals
+received while the sensor timeout is active are applied and acknowledged with
+the new identity, but remain pending in EMERGENCY_STOP until fresh sensing
+resumes; this also applies in legacy mode. The final gate rejects a candidate
+if the sensor times out during optimization. There is no change to inflation,
+A*, optimizer costs, ceiling/recovery tolerances, or the upstream unchecked
+obstacle-tail policy.
 
 ## Reproduce without a simulator
 
@@ -77,5 +85,11 @@ Use an isolated container (`--network none`, private ROS_DOMAIN_ID), not the
 simulation stack. `ordered_commands_check.py` uses a real planner in a fused
 closed box, waits for real failing A*, adds a new lidar voxel while planning,
 and checks goal/cancel/goal application and stale/legacy cancel isolation.
-`test_trajectory_publication_check` checks a concurrent late obstacle, atomic
-final validation, and retention of the original unchecked-tail policy.
+`test_trajectory_publication_check` checks a late obstacle, atomic final
+validation, and retention of the original unchecked-tail policy.
+`test_safety_command_preemption` uses a Linux GNU/Clang test-only linker wrapper
+around the optimizer result (and private access only on that test executable).
+It exercises the real FSM/gate/rollback and ROS publications with deterministic
+command or sensing interleavings, including immediate safety stops and sensor
+recovery. No production injection hook is installed. It complements, rather than
+replaces, the real-optimizer integration harness.

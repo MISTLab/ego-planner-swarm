@@ -1048,7 +1048,8 @@ namespace ego_planner
 
             // Send the stop now: the next exec tick drains queued goals
             // before its state switch and could otherwise erase this stop.
-            callEmergencyStop(odom_pos_);
+            if (exec_state_ != EMERGENCY_STOP || flag_escape_emergency_)
+              callEmergencyStop(odom_pos_);
             flag_escape_emergency_ = false;
             changeFSMExecState(EMERGENCY_STOP, "SAFETY");
           }

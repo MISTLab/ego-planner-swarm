@@ -259,6 +259,29 @@ TEST_F(SafetyCommandPreemption, FailedSafetyReplanPublishesStopBeforeQueuedGoal)
   EXPECT_EQ(fsm.planner_manager_->local_data_.traj_id_, stopped.traj_id_);
 }
 
+TEST_F(SafetyCommandPreemption, PersistentCollisionKeepsOriginalStopWithoutRepublishing)
+{
+  observe({.45, .05, 1.25});
+  ASSERT_EQ(fsm.planner_manager_->grid_map_->getInflateOccupancy(fsm.odom_pos_), 1);
+  int attempts = 0;
+  optimizer_result = [&](EGOPlannerManager &) {++attempts; return false;};
+  fsm.checkCollisionCallback();
+  collectPublications();
+  ASSERT_EQ(published.size(), 1u);
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::EMERGENCY_STOP);
+  ASSERT_FALSE(fsm.flag_escape_emergency_);
+  previous = fsm.planner_manager_->local_data_;
+
+  // Momentum changes odometry, but a persistent collision at occupied P0
+  // must not make the hold point follow it on the next safety tick.
+  fsm.odom_pos_.x() += .05;
+  fsm.checkCollisionCallback();
+  collectPublications();
+  EXPECT_EQ(attempts, 6) << "both safety callbacks must exercise the failing fallback";
+  EXPECT_EQ(published.size(), 1u) << "already-published stop was sent again";
+  expectPreviousTrajectory();
+}
+
 TEST_F(SafetyCommandPreemption, GateRejectionRestoresEntirePreviousTrajectory)
 {
   optimizer_result = [&](EGOPlannerManager & manager) {

@@ -1,11 +1,34 @@
 // #include <fstream>
 #include <ego_planner/planner_manager.h>
 #include <plan_env/flight_band_check.h>
+#include <algorithm>
+#include <cmath>
 #include <thread>
 #include "visualization_msgs/msg/marker.hpp" // zx-todo
 
 namespace ego_planner
 {
+  namespace
+  {
+    // SwarmDeck: hard bounds on one replan (lane ego-oom, drone-r5 OOM).
+    // A local plan covers about one planning horizon in points about
+    // ctrl_pt_dist apart; the worst ordinary polynomial initialization needs
+    // a few times horizon / ctrl_pt_dist. parameterizeToBspline solves a dense
+    // (K + 4) x (K + 2) system, so K is also the memory bound: 100 points are
+    // well under a MiB, 40000 points are 13 GB.
+    double maxInitialPoints(const PlanParameters &pp)
+    {
+      return std::max(100.0, 10.0 * pp.planning_horizen_ / pp.ctrl_pt_dist);
+    }
+
+    // Time reallocation keeps the control-point count and stretches the time
+    // span by checkFeasibility's ratio, normally barely above 1. A non-finite
+    // ratio makes reparamBspline's sampling step infinite and its loop endless
+    // (the memory bug). The finite cap is a policy, not a memory bound: a plan
+    // ten times over the dynamic limits is rejected rather than slowed into a
+    // very long trajectory, whose band check samples every 10 ms.
+    constexpr double kMaxTimeReallocationRatio = 10.0;
+  } // namespace
 
   EGOPlannerManager::EGOPlannerManager() {}
 
@@ -53,6 +76,14 @@ namespace ego_planner
     static int count = 0;
     printf("\033[47;30m\n[drone %d replan %d]==============================================\033[0m\n", pp_.drone_id, count++);
 
+    if (!start_pt.allFinite() || !start_vel.allFinite() || !start_acc.allFinite() ||
+        !local_target_pt.allFinite() || !local_target_vel.allFinite())
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("ego_planner"), "Non-finite start state or local target, skip this planning.");
+      continous_failures_count_++;
+      return false;
+    }
+
     if ((start_pt - local_target_pt).norm() < 0.2)
     {
       cout << "Close to goal" << endl;
@@ -70,6 +101,7 @@ namespace ego_planner
     ***/
     double ts = (start_pt - local_target_pt).norm() > 0.1 ? pp_.ctrl_pt_dist / pp_.max_vel_ * 1.5 : pp_.ctrl_pt_dist / pp_.max_vel_ * 5; // pp_.ctrl_pt_dist / pp_.max_vel_ is too tense, and will surely exceed the acc/vel limits
     vector<Eigen::Vector3d> point_set, start_end_derivatives;
+    const double max_init_points = maxInitialPoints(pp_);
     static bool flag_first_call = true, flag_force_polynomial = false;
     bool flag_regenerate = false;
     do
@@ -117,6 +149,15 @@ namespace ego_planner
         do
         {
           ts /= 1.5;
+          // Also false for a NaN time and a ts that shrank to zero.
+          if (!(time / ts <= max_init_points))
+          {
+            RCLCPP_ERROR(rclcpp::get_logger("ego_planner"),
+                         "The initial path needs more than %.0f points (duration %f s, step %g s), skip this planning.",
+                         max_init_points, time, ts);
+            continous_failures_count_++;
+            return false;
+          }
           point_set.clear();
           flag_too_far = false;
           Eigen::Vector3d last_pt = gl_traj.evaluate(0);
@@ -157,6 +198,17 @@ namespace ego_planner
         }
         t -= ts;
 
+        if (segment_point.empty())
+        {
+          // The flown trajectory has ended: replanning failed for longer than
+          // its remaining duration. Nothing is left to follow (indexing the
+          // last two samples below would read outside segment_point), so
+          // start from a polynomial, as for an abnormally long path.
+          flag_force_polynomial = true;
+          flag_regenerate = true;
+          continue;
+        }
+
         double poly_time = (local_data_.position_traj_.evaluateDeBoorT(t) - local_target_pt).norm() / pp_.max_vel_ * 2;
         if (poly_time > ts)
         {
@@ -181,6 +233,15 @@ namespace ego_planner
           }
         }
 
+        if (pseudo_arc_length.size() < 2 || !(pseudo_arc_length.back() > 0.0) || !std::isfinite(pseudo_arc_length.back()))
+        {
+          // Resampling needs two samples a positive, finite length apart;
+          // otherwise the loop below never reaches 7 points.
+          flag_force_polynomial = true;
+          flag_regenerate = true;
+          continue;
+        }
+
         double sample_length = 0;
         double cps_dist = pp_.ctrl_pt_dist * 1.5; // cps_dist will be divided by 1.5 in the next
         size_t id = 0;
@@ -190,7 +251,9 @@ namespace ego_planner
           point_set.clear();
           sample_length = 0;
           id = 0;
-          while ((id <= pseudo_arc_length.size() - 2) && sample_length <= pseudo_arc_length.back())
+          // A path past max_init_points is abnormally long (checked below).
+          while ((id <= pseudo_arc_length.size() - 2) && sample_length <= pseudo_arc_length.back() &&
+                 point_set.size() <= max_init_points)
           {
             if (sample_length >= pseudo_arc_length[id] && sample_length < pseudo_arc_length[id + 1])
             {
@@ -552,6 +615,13 @@ namespace ego_planner
 
   bool EGOPlannerManager::refineTrajAlgo(UniformBspline &traj, vector<Eigen::Vector3d> &start_end_derivative, double ratio, double &ts, Eigen::MatrixXd &optimal_control_points)
   {
+    // Also false for a NaN ratio.
+    if (!(ratio <= kMaxTimeReallocationRatio))
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("ego_planner"), "Time reallocation ratio %f is out of bounds, skip this planning.", ratio);
+      return false;
+    }
+
     double t_inc;
 
     Eigen::MatrixXd ctrl_pts; // = traj.getControlPoint()

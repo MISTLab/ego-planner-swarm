@@ -122,6 +122,14 @@ if(BUILD_TESTING)
       plan_env path_searching bspline_opt traj_utils cv_bridge pcl_conversions)
     target_link_libraries(test_planning_bounds ${TRAJ_UTILS_LIB})
 
+    ament_add_gtest(test_replan_backoff
+      test/test_replan_backoff.cpp src/ego_replan_fsm.cpp src/planner_manager.cpp)
+    target_compile_options(test_replan_backoff PRIVATE -fno-access-control)
+    ament_target_dependencies(test_replan_backoff
+      rclcpp std_msgs nav_msgs visualization_msgs geometry_msgs quadrotor_msgs
+      plan_env path_searching bspline_opt traj_utils cv_bridge pcl_conversions)
+    target_link_libraries(test_replan_backoff ${TRAJ_UTILS_LIB}
+      "-Wl,--wrap=_ZN11ego_planner17EGOPlannerManager13reboundReplanEN5Eigen6MatrixIdLi3ELi1ELi0ELi3ELi1EEES3_S3_S3_S3_bb")
   endif()
 endif()
 

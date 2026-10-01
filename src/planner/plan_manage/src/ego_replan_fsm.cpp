@@ -5,6 +5,19 @@
 
 namespace ego_planner
 {
+  namespace
+  {
+    // SwarmDeck: REPLAN_TRAJ retried a failing replan on every 10 ms tick,
+    // three optimizations each (drone-r5: a terminal point in an obstacle,
+    // about 250 a second until the flown trajectory ran out). Two retries stay
+    // immediate; then wait 20 ms, doubling up to 0.5 s.
+    std::chrono::milliseconds replanBackoff(int failures)
+    {
+      if (failures <= 2)
+        return std::chrono::milliseconds(0);
+      return std::chrono::milliseconds(std::min(500, 20 << std::min(failures - 3, 5)));
+    }
+  } // namespace
 
   void EGOReplanFSM::init(rclcpp::Node::SharedPtr &node)
   {
@@ -622,7 +635,12 @@ namespace ego_planner
     if (new_state == exec_state_)
       continously_called_times_++;
     else
+    {
       continously_called_times_ = 1;
+      // Any other state (a success, a new goal, a cancel) ends the back-off.
+      replan_failures_ = 0;
+      replan_not_before_ = std::chrono::steady_clock::time_point();
+    }
 
     static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
     int pre_s = int(exec_state_);
@@ -821,6 +839,9 @@ namespace ego_planner
         break;
       }
 
+      if (std::chrono::steady_clock::now() < replan_not_before_)
+        break; // backing off: replanBackoff
+
       if (planFromCurrentTraj(1))
       {
         changeFSMExecState(EXEC_TRAJ, "FSM");
@@ -828,6 +849,8 @@ namespace ego_planner
       }
       else
       {
+        replan_failures_++;
+        replan_not_before_ = std::chrono::steady_clock::now() + replanBackoff(replan_failures_);
         changeFSMExecState(REPLAN_TRAJ, "FSM");
       }
 

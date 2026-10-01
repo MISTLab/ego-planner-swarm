@@ -3,6 +3,7 @@
 
 #include <Eigen/Eigen>
 #include <algorithm>
+#include <chrono>
 #include <iostream>
 #include <map>
 #include <deque>
@@ -77,6 +78,9 @@ namespace ego_planner
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
+    /* SwarmDeck: consecutive failed REPLAN_TRAJ ticks, and the back-off they set */
+    int replan_failures_{0};
+    std::chrono::steady_clock::time_point replan_not_before_{};
     /* SwarmDeck: a goal received before odometry, planned from the first odometry */
     bool have_pending_goal_{false};
     Eigen::Vector3d pending_goal_;

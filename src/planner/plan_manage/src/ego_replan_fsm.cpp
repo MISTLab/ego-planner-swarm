@@ -1058,18 +1058,13 @@ namespace ego_planner
         map->flightBandLimits(info->start_pos_, start_low, start_high) &&
         (info->start_pos_.z() < start_low || info->start_pos_.z() > start_high);
     const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
-        (map->getOccupancy(odom_pos_) != 0 ||
-         (band_correction && (map->isUnknown(odom_pos_) || map->getInflateOccupancy(
-             odom_pos_, std::numeric_limits<double>::infinity()) != 0)) ||
-         (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
-          (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high) &&
-          // A band correction may still be in its certified vertical prefix.
-          // Revalidate from the actual pose as well as the original start.
-          (!map->escapeSegmentSafe(odom_pos_, escape_end) ||
-           (odom_pos_ - escape_end).norm() > (info->start_pos_ - escape_end).norm() + 1e-6)));
-    if (exec_state_ == INFLATED_ESCAPE &&
-        (escape_pose_blocked || !map->escapeSegmentSafe(
-            info->start_pos_, info->position_traj_.evaluateDeBoorT(info->duration_))))
+        (band_correction
+         ? !map->bandEscapeTrackingSafe(info->start_pos_, escape_end, odom_pos_)
+         : (map->getOccupancy(odom_pos_) != 0 ||
+            (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
+             (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high)) ||
+            !map->escapeSegmentSafe(info->start_pos_, escape_end)));
+    if (escape_pose_blocked)
     {
       callEmergencyStop(odom_pos_);
       have_target_ = false;

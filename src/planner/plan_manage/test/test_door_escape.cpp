@@ -57,7 +57,11 @@ TEST_F(BandDoorEscape, BandPrefixSurvivesSafetyCheckButNotTrackingAway) {
   auto map = fsm.planner_manager_->grid_map_;
   fsm.odom_pos_ = {1.05, .05, .82};
   for (int i = 0; i < 5; ++i) {
-    map->inputCloud({{1.05, .05, 3.05}}, {1.05, .05, .52});
+    for (double x : {.95, 1.05, 1.15}) {
+      for (double y : {-.05, .05, .15}) {
+        map->inputCloud({{x, y, 3.05}}, {x, y, .52});
+      }
+    }
   }
   fsm.planNextWaypoint({1.05, .05, 1.32});
   fsm.execFSMCallback();
@@ -73,7 +77,11 @@ TEST_F(BandDoorEscape, BandCorrectionCannotDriftIntoUnobservedAirInsideTheBand) 
   auto map = fsm.planner_manager_->grid_map_;
   fsm.odom_pos_ = {1.05, .05, .82};
   for (int i = 0; i < 5; ++i) {
-    map->inputCloud({{1.05, .05, 3.05}}, {1.05, .05, .52});
+    for (double x : {.95, 1.05, 1.15}) {
+      for (double y : {-.05, .05, .15}) {
+        map->inputCloud({{x, y, 3.05}}, {x, y, .52});
+      }
+    }
   }
   fsm.planNextWaypoint({1.05, .05, 1.32});
   fsm.execFSMCallback();
@@ -293,5 +301,59 @@ TEST_F(DoorEscape, ObliqueGoalKeepsOneCellNormalClearance) {
   EXPECT_LE((end - start).norm(), .500001);
   EXPECT_LE(end.y(), .8 + 1e-9);
   EXPECT_EQ(map->getInflateOccupancy(end + Eigen::Vector3d(0, .099, 0)), 0);
+}
+}
+
+namespace ego_planner
+{
+TEST_F(BandDoorEscape, LateralTrackingTubeReachesEscaped) {
+  auto map = fsm.planner_manager_->grid_map_;
+  fsm.odom_pos_ = {1.05, .05, .82};
+  for (int i = 0; i < 5; ++i) {
+    for (double x : {.95, 1.05, 1.15}) {
+      for (double y : {-.05, .05, .15}) {
+        map->inputCloud({{x, y, 3.05}}, {x, y, .52});
+      }
+    }
+  }
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  auto & info = fsm.planner_manager_->local_data_;
+  const Eigen::Vector3d end = info.position_traj_.evaluateDeBoorT(info.duration_);
+  for (double drift : {.02, -.03, .05}) {
+    fsm.odom_pos_.x() = 1.05 + drift;
+    fsm.odom_pos_.z() += .02;
+    fsm.checkCollisionCallback();
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  }
+  fsm.odom_pos_.z() = end.z();
+  info.start_time_ = rclcpp::Clock().now() - rclcpp::Duration::from_seconds(4.);
+  fsm.checkCollisionCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.execFSMCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
+}
+
+TEST_F(BandDoorEscape, PhysicalInflationEnteringTrackingTubeStopsEscape) {
+  auto map = fsm.planner_manager_->grid_map_;
+  fsm.odom_pos_ = {1.09, .05, .82};
+  for (int i = 0; i < 5; ++i) {
+    for (double x : {.95, 1.05, 1.15}) {
+      for (double y : {-.05, .05, .15}) {
+        map->inputCloud({{x, y, 3.05}}, {x, y, .52});
+      }
+    }
+  }
+  fsm.planNextWaypoint({1.09, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  for (int i = 0; i < 5; ++i) {
+    map->inputCloud({{1.45, .05, .95}}, {1.65, .05, .95});
+  }
+  ASSERT_EQ(map->getInflateOccupancy({1.09, .05, .95}, INFINITY), 0);
+  ASSERT_EQ(map->getInflateOccupancy({1.14, .05, .95}, INFINITY), 1);
+  fsm.checkCollisionCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
 }
 }

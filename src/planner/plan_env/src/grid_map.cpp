@@ -553,6 +553,60 @@ void GridMap::logOccupiedStart(const Eigen::Vector3d &start)
 }
 
 
+bool GridMap::bandEscapeTrackingSafe(const Eigen::Vector3d &start,
+                                     const Eigen::Vector3d &end,
+                                     const Eigen::Vector3d &pose)
+{
+  auto guard = lock();
+  const double radius = mp_.resolution_ * .5;
+  const double dz = end.z() - start.z();
+  if (!start.allFinite() || !end.allFinite() || !pose.allFinite() ||
+      (end - start).head<2>().norm() > 1e-9 || std::abs(dz) < 1e-9 ||
+      std::abs(dz) > mp_.obstacles_inflation_ + 2 * mp_.resolution_ + 1e-9 ||
+      (pose - start).head<2>().norm() > radius + 1e-9 ||
+      (pose.z() - start.z()) * dz < -1e-9 ||
+      !isInMap(pose) || isUnknown(pose) || getOccupancy(pose) != 0 ||
+      getInflateOccupancy(pose, std::numeric_limits<double>::infinity()) != 0)
+    return false;
+  // Project measured progress onto the PLANNED vertical segment. A small
+  // lateral tracking error must not turn it into a diagonal escape. Check
+  // every voxel intersecting the closed tube, not just sparse radial samples.
+  const double z = std::clamp(pose.z(), std::min(start.z(), end.z()),
+                             std::max(start.z(), end.z()));
+  if ((pose.z() - end.z()) * dz > 0 && getInflateOccupancy(pose) != 0)
+    return false;
+  const Eigen::Vector3d low(start.x() - radius - 1e-9,
+                            start.y() - radius - 1e-9, std::min(z, end.z()));
+  const Eigen::Vector3d high(start.x() + radius + 1e-9,
+                             start.y() + radius + 1e-9, std::max(z, end.z()));
+  const auto lo = window_.indexOf(low), hi = window_.indexOf(high);
+  const int count = std::max(1, int(std::ceil(std::abs(end.z() - z) / (mp_.resolution_ * .1))));
+  for (int x = lo.x(); x <= hi.x(); ++x) {
+    for (int y = lo.y(); y <= hi.y(); ++y) {
+      const Eigen::Vector3d center = window_.centerOf({x, y, lo.z()});
+      const double dx = std::max(0.0, std::abs(center.x() - start.x()) - radius);
+      const double dy = std::max(0.0, std::abs(center.y() - start.y()) - radius);
+      if (dx * dx + dy * dy > radius * radius + 1e-12) continue;
+      double previous = std::numeric_limits<double>::infinity();
+      for (int i = 0; i <= count; ++i) {
+        const Eigen::Vector3d p(center.x(), center.y(), z + (end.z() - z) * double(i) / count);
+        if (!isInMap(p) || isUnknown(p) || getOccupancy(p) != 0 ||
+            getInflateOccupancy(p, std::numeric_limits<double>::infinity()) != 0)
+          return false;
+        double band_low, band_high;
+        if (!flightBandLimits(p, band_low, band_high)) return false;
+        const double violation = std::max(0.0, std::max(band_low - p.z(), p.z() - band_high));
+        if (i > 0 && ((previous > 0 && violation >= previous) ||
+                      (previous == 0 && violation > 0))) return false;
+        previous = violation;
+      }
+      if (previous > 0) return false;
+    }
+  }
+  return true;
+}
+
+
 bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end)
 {
   auto guard = lock();

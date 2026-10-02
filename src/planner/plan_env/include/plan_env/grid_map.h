@@ -130,6 +130,9 @@ public:
   // Bounded inflation departure or vertical band correction; no raw-cell exemption.
   bool inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d &preferred,
                       Eigen::Vector3d &end);
+  // Remaining vertical band correction and its half-cell lateral tracking tube.
+  bool bandEscapeTrackingSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end,
+                              const Eigen::Vector3d &pose);
   bool escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end);
   void logOccupiedStart(const Eigen::Vector3d &start);
 

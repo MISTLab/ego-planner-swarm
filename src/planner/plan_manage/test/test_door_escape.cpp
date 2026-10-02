@@ -181,4 +181,17 @@ TEST_F(DoorEscape, PeerBodiesRemainBlockingDuringEscape) {
   peer.position_traj_ = UniformBspline(controls, 3, 4.);
   EXPECT_FALSE(manager->inflatedStartEscape(fsm.odom_pos_, {-.306, -1., 1.769}));
 }
+
+TEST_F(DoorEscape, CancelStopsTheEscapeSplineImmediately) {
+  pillar();
+  fsm.planNextWaypoint({-.306, -1., 1.769});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.cancelCallback(nullptr);
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::WAIT_TARGET);
+  const auto controls = fsm.planner_manager_->local_data_.position_traj_.getControlPoint();
+  for (int i = 0; i < controls.cols(); ++i) {
+    EXPECT_TRUE(controls.col(i).isApprox(fsm.odom_pos_));
+}
+}
 } // namespace ego_planner

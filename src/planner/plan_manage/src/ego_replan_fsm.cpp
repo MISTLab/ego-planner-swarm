@@ -1059,8 +1059,8 @@ namespace ego_planner
         (info->start_pos_.z() < start_low || info->start_pos_.z() > start_high);
     const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
         (map->getOccupancy(odom_pos_) != 0 ||
-         (band_correction && map->getInflateOccupancy(
-             odom_pos_, std::numeric_limits<double>::infinity()) != 0) ||
+         (band_correction && (map->isUnknown(odom_pos_) || map->getInflateOccupancy(
+             odom_pos_, std::numeric_limits<double>::infinity()) != 0)) ||
          (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
           (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high) &&
           // A band correction may still be in its certified vertical prefix.

@@ -69,6 +69,22 @@ TEST_F(BandDoorEscape, BandPrefixSurvivesSafetyCheckButNotTrackingAway) {
   EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
 }
 
+TEST_F(BandDoorEscape, BandCorrectionCannotDriftIntoUnobservedAirInsideTheBand) {
+  auto map = fsm.planner_manager_->grid_map_;
+  fsm.odom_pos_ = {1.05, .05, .82};
+  for (int i = 0; i < 5; ++i) {
+    map->inputCloud({{1.05, .05, 3.05}}, {1.05, .05, .52});
+  }
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.odom_pos_ = {1.25, .05, 1.12};
+  ASSERT_TRUE(map->isUnknown(fsm.odom_pos_));
+  ASSERT_EQ(map->getInflateOccupancy(fsm.odom_pos_), 0);
+  fsm.checkCollisionCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+}
+
 TEST_F(DoorEscape, R7InflatedButNotRawStartEscapesOutward) {
   pillar();
   auto map = fsm.planner_manager_->grid_map_;

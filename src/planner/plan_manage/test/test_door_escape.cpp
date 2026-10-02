@@ -76,7 +76,7 @@ TEST_F(DoorEscape, EscapeThenNormalPlanningOnceAndDriftDoesNotReescape) {
   fsm.planNextWaypoint({-.306, -1., 1.769});
   fsm.execFSMCallback();
   ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
-  auto &info = fsm.planner_manager_->local_data_;
+  auto & info = fsm.planner_manager_->local_data_;
   fsm.odom_pos_ = info.position_traj_.evaluateDeBoorT(info.duration_);
   // Five cm of tracking error must not leave us inflated.
   fsm.odom_pos_.y() += .05;

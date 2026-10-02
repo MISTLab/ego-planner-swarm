@@ -1094,7 +1094,7 @@ namespace ego_planner
         }
         Eigen::Vector3d swarm_pridicted = planner_manager_->swarm_trajs_buf_.at(id).position_traj_.evaluateDeBoorT(t_X);
         const Eigen::Vector3d ours = exec_state_ == INFLATED_ESCAPE
-            ? info->position_traj_.evaluateDeBoorT(t) : p_cur;
+            ? Eigen::Vector3d(info->position_traj_.evaluateDeBoorT(t)) : p_cur;
         double dist = (ours - swarm_pridicted).norm();
 
         if (dist < CLEARANCE)

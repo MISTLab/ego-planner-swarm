@@ -147,7 +147,7 @@ TEST_F(DoorEscape, AlongIntoRawAndUnboundedEscapeSegmentsAreRefused) {
   EXPECT_TRUE(map->escapeSegmentSafe(start, start + Eigen::Vector3d(0, -.1, 0)));
   EXPECT_FALSE(map->escapeSegmentSafe(start, start + Eigen::Vector3d(.3, 0, 0)));
   EXPECT_FALSE(map->escapeSegmentSafe(start, start + Eigen::Vector3d(0, .35, 0)));
-  EXPECT_FALSE(map->escapeSegmentSafe(start, start + Eigen::Vector3d(0, -.401, 0)));
+  EXPECT_FALSE(map->escapeSegmentSafe(start, start + Eigen::Vector3d(0, -.501, 0)));
   EXPECT_FALSE(map->escapeSegmentSafe(start, start));
 }
 TEST_F(DoorEscape, FlightBandCannotBeExemptedByEscape) {

@@ -526,7 +526,7 @@ void GridMap::publishMapInflate(bool all_info)
 bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end)
 {
   auto guard = lock();
-  const double bound = mp_.obstacles_inflation_ + mp_.resolution_;
+  const double bound = mp_.obstacles_inflation_ + 2 * mp_.resolution_;
   const Eigen::Vector3d delta = end - start;
   if (!start.allFinite() || !end.allFinite() || delta.norm() > bound + 1e-9 ||
       delta.norm() < 1e-9 || getOccupancy(start) != 0 || getInflateOccupancy(end) != 0)
@@ -595,16 +595,27 @@ bool GridMap::inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d
     for (int y=-1; y<=1; ++y)
       for (int z=-1; z<=1; ++z)
         if (x || y || z) directions.push_back(Eigen::Vector3d(x,y,z).normalized());
-  const double bound = mp_.obstacles_inflation_ + mp_.resolution_;
+  const double bound = mp_.obstacles_inflation_ + 2 * mp_.resolution_;
   for (const auto &direction : directions) {
-    double first_free = -1;
     for (double distance=mp_.resolution_*.25; distance<=bound+1e-9; distance+=mp_.resolution_*.25) {
       const Eigen::Vector3d candidate = start + distance*direction;
       if (!escapeSegmentSafe(start, candidate)) continue;
-      if (first_free < 0) first_free = distance;
-      // One full cell beyond the first safe sample, not a boundary skim.
-      // Keep the original inflation + one cell total escape-length bound.
-      if (distance + 1e-9 >= first_free + mp_.resolution_) {
+      // Distance to the inflated voxel UNION, not distance travelled along
+      // an oblique ray. A full cell of normal clearance tolerates tracking
+      // error in any direction, including towards a corner of the boundary.
+      const Eigen::Vector3i center = window_.indexOf(candidate);
+      bool margin = true;
+      for (int x=-2; x<=2 && margin; ++x)
+        for (int y=-2; y<=2 && margin; ++y)
+          for (int z=-2; z<=2 && margin; ++z) {
+            const Eigen::Vector3i id = center + Eigen::Vector3i(x,y,z);
+            if (!window_.contains(id)) { margin=false; break; }
+            if (md_.occupancy_buffer_inflate_[window_.address(id)] == 0) continue;
+            const double clearance = ((candidate-window_.centerOf(id)).cwiseAbs()
+                - Eigen::Vector3d::Constant(mp_.resolution_*.5)).cwiseMax(0).norm();
+            if (clearance < mp_.resolution_ - 1e-9) margin=false;
+          }
+      if (margin) {
         end=candidate;
         return true;
       }

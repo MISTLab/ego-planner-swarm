@@ -1043,8 +1043,14 @@ namespace ego_planner
       return; // local_data_ now holds the stop, not the trajectory below
     }
 
+    double escape_low, escape_high;
+    const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
+        (map->getOccupancy(odom_pos_) != 0 ||
+         (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
+          (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high)));
     if (exec_state_ == INFLATED_ESCAPE &&
-        !map->escapeSegmentSafe(info->start_pos_, info->position_traj_.evaluateDeBoorT(info->duration_)))
+        (escape_pose_blocked || !map->escapeSegmentSafe(
+            info->start_pos_, info->position_traj_.evaluateDeBoorT(info->duration_))))
     {
       callEmergencyStop(odom_pos_);
       have_target_ = false;

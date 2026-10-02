@@ -447,7 +447,16 @@ namespace ego_planner
     updateTrajInfo(UniformBspline(controls, 3, 1.0), rclcpp::Clock().now());
     for (size_t id=0; id<swarm_trajs_buf_.size(); ++id) {
       if (swarm_trajs_buf_[id].drone_id != int(id) || int(id) == pp_.drone_id) continue;
-      if (checkCollision(int(id))) { local_data_ = previous; return false; }
+      auto &peer = swarm_trajs_buf_[id];
+      for (double t=0; t<=local_data_.duration_+1e-9; t+=.01) {
+        const double pt = (local_data_.start_time_-peer.start_time_).seconds()+t;
+        if (pt < 0 || pt > peer.duration_) continue;
+        if ((local_data_.position_traj_.evaluateDeBoorT(t)-
+             peer.position_traj_.evaluateDeBoorT(pt)).norm() < getSwarmClearance()) {
+          local_data_ = previous;
+          return false;
+        }
+      }
     }
     return true;
   }

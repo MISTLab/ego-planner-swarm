@@ -761,8 +761,8 @@ namespace ego_planner
     // a free prefix inside an obstacle. Yield to an external, bounded retreat;
     // never move the spline's start to a fictitious nearest free cell.
     // Tracking replans start on our existing spline, not at the drifted pose.
-    // Odometry-start plans still require a strictly free start: their optimizer
-    // cannot recover even a small band violation, so request external retreat.
+    // Odometry-start plans need a free start. Before yielding to external
+    // retreat, try a bounded, certified inflation or vertical band correction.
     const double pose_band_tolerance =
         (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ) ? 0.1 : 0.0;
     if (report_occupied_start_ && have_odom_ && have_target_ && exec_state_ != INFLATED_ESCAPE &&

@@ -406,3 +406,37 @@ TEST_F(GroundRelativeBand, LeavesInBandOccupancyToUpstreamCollisionChecks) {
   EXPECT_TRUE(check.accept(occupied, 1.0, false));
   EXPECT_TRUE(check.accept(occupied, 2.0, true));
 }
+
+TEST_F(GroundRelativeBand, BandOnlyStartCanCorrectVerticallyThroughObservedFreeColumn) {
+  auto map = band();
+  const Eigen::Vector3d low(1.05, .05, .82), inside(1.05, .05, 1.12);
+  // Clear the correction column; the raw endpoint is beyond the escape bound.
+  observe(*map, {1.05, .05, 4.05}, low);
+  ASSERT_EQ(map->getOccupancy(low), 0);
+  ASSERT_EQ(map->getInflateOccupancy(low), 1);
+  EXPECT_TRUE(map->escapeSegmentSafe(low, inside));
+  Eigen::Vector3d end;
+  EXPECT_TRUE(map->inflatedEscape(low, {3., .05, 1.12}, end));
+  EXPECT_NEAR(end.x(), low.x(), 1e-9);
+  EXPECT_NEAR(end.y(), low.y(), 1e-9);
+  EXPECT_GE(end.z(), .92);
+  EXPECT_FALSE(map->escapeSegmentSafe(low, {1.15, .05, 1.12}));
+  EXPECT_FALSE(map->escapeSegmentSafe(low, {1.05, .05, .72}));
+}
+
+TEST_F(GroundRelativeBand, BandCorrectionRejectsUnknownAndInflatedColumns) {
+  auto map = band();
+  const Eigen::Vector3d low(1.05, .05, .82), inside(1.05, .05, 1.12);
+  EXPECT_FALSE(map->escapeSegmentSafe(low, inside));
+  observe(*map, {1.05, .05, 4.05}, low);
+  observe(*map, {1.25, .05, 1.12}, low);
+  EXPECT_FALSE(map->escapeSegmentSafe(low, inside));
+}
+
+TEST_F(GroundRelativeBand, UpperBandCorrectionIsAlsoBoundedAndVertical) {
+  auto map = band();
+  const Eigen::Vector3d high(1.05, .05, 2.72), inside(1.05, .05, 2.42);
+  observe(*map, {1.05, .05, 4.05}, {1.05, .05, 1.32});
+  EXPECT_TRUE(map->escapeSegmentSafe(high, inside));
+  EXPECT_FALSE(map->escapeSegmentSafe({1.05, .05, 3.42}, inside));
+}

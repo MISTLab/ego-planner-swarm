@@ -77,6 +77,7 @@ namespace ego_planner
 
     /* planning data */
     bool have_trigger_, have_target_, have_odom_, have_new_target_, have_recv_pre_agent_;
+    bool inflated_escape_attempted_ = false; // reset only by an accepted new target
     FSM_EXEC_STATE exec_state_;
     int continously_called_times_{0};
     /* SwarmDeck: consecutive failed REPLAN_TRAJ ticks, and the back-off they set */

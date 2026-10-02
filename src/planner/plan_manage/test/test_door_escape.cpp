@@ -118,6 +118,28 @@ TEST_F(DoorEscape, PlannerTrajectoryFits09mDoor) {
 }
 }
 
+TEST_F(DoorEscape, PlannerTrajectoryFits08mFreeRun) {
+  auto manager = fsm.planner_manager_.get();
+  auto map = manager->grid_map_;
+  const Eigen::Vector3d start(-1.5, .05, 1.25), goal(1.5, .05, 1.25);
+  map->recenter(start);
+  std::vector<Eigen::Vector3d> hits;
+  for (int iy = -30; iy < 30; ++iy) {
+    const double y = (iy + .5) * .1;
+    for (double z = .05; z < 3.; z += .1) {
+      if (iy < -4 || iy >= 4 || z >= 2.) {hits.push_back({.05, y, z});}}
+}
+  for (int i = 0; i < 5; ++i) {
+    map->inputCloud(hits, start);
+}
+  ASSERT_TRUE(manager->reboundReplan(start, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                                    goal, Eigen::Vector3d::Zero(), true, false));
+  auto & info = manager->local_data_;
+  for (double t = 0; t <= info.duration_; t += .01) {
+    EXPECT_EQ(map->getInflateOccupancy(info.position_traj_.evaluateDeBoorT(t)), 0);
+}
+}
+
 TEST_F(DoorEscape, AlongIntoRawAndUnboundedEscapeSegmentsAreRefused) {
   pillar();
   auto map = fsm.planner_manager_->grid_map_;

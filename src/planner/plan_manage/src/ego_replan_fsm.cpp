@@ -328,6 +328,7 @@ namespace ego_planner
       end_vel_.setZero();
       have_target_ = true;
       have_new_target_ = true;
+      inflated_escape_attempted_ = false;
 
       /*** FSM state change (SwarmDeck: never block the executor) ***/
       enable_fail_safe_ = configured_fail_safe_;
@@ -642,7 +643,7 @@ namespace ego_planner
       replan_not_before_ = std::chrono::steady_clock::time_point();
     }
 
-    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "EXEC_TRAJ"};
+    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "INFLATED_ESCAPE"};
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
@@ -657,7 +658,7 @@ namespace ego_planner
 
   void EGOReplanFSM::printFSMExecState()
   {
-    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "EXEC_TRAJ"};
+    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "INFLATED_ESCAPE"};
 
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
@@ -768,11 +769,13 @@ namespace ego_planner
         planner_manager_->grid_map_->getInflateOccupancy(odom_pos_, pose_band_tolerance) != 0)
     {
       auto guard = planner_manager_->grid_map_->lock();
-      if (odom_vel_.norm() < 0.1 && !planner_manager_->grid_map_->getOdomDepthTimeout() &&
+      if (!inflated_escape_attempted_ && odom_vel_.norm() < 0.1 &&
+          !planner_manager_->grid_map_->getOdomDepthTimeout() &&
           planner_manager_->inflatedStartEscape(odom_pos_, end_pt_) && !commandsPending())
       {
         publishLocalTrajectory();
         publishSwarmTrajs(false);
+        inflated_escape_attempted_ = true;
         changeFSMExecState(INFLATED_ESCAPE, "INFLATED_ESCAPE");
         goto force_return;
       }

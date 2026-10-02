@@ -596,10 +596,19 @@ bool GridMap::inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d
       for (int z=-1; z<=1; ++z)
         if (x || y || z) directions.push_back(Eigen::Vector3d(x,y,z).normalized());
   const double bound = mp_.obstacles_inflation_ + mp_.resolution_;
-  for (const auto &direction : directions)
+  for (const auto &direction : directions) {
+    double first_free = -1;
     for (double distance=mp_.resolution_*.25; distance<=bound+1e-9; distance+=mp_.resolution_*.25) {
       const Eigen::Vector3d candidate = start + distance*direction;
-      if (escapeSegmentSafe(start, candidate)) { end=candidate; return true; }
+      if (!escapeSegmentSafe(start, candidate)) continue;
+      if (first_free < 0) first_free = distance;
+      // One full cell beyond the first safe sample, not a boundary skim.
+      // Keep the original inflation + one cell total escape-length bound.
+      if (distance + 1e-9 >= first_free + mp_.resolution_) {
+        end=candidate;
+        return true;
+      }
     }
+  }
   return false;
 }

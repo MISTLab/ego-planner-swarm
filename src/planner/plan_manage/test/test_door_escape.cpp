@@ -248,7 +248,8 @@ TEST_F(DoorEscape, ObliqueGoalKeepsOneCellNormalClearance) {
   // 80 degrees from the boundary normal: a cell along the ray isn't enough.
   const double angle = 80. * M_PI / 180.;
   Eigen::Vector3d end;
-  ASSERT_TRUE(map->inflatedEscape(start, start + Eigen::Vector3d(std::sin(angle), -std::cos(angle), 0), end));
+  ASSERT_TRUE(map->inflatedEscape(start,
+      start + Eigen::Vector3d(std::sin(angle), -std::cos(angle), 0), end));
   EXPECT_LE((end - start).norm(), .500001);
   EXPECT_LE(end.y(), .8 + 1e-9);
   EXPECT_EQ(map->getInflateOccupancy(end + Eigen::Vector3d(0, .099, 0)), 0);

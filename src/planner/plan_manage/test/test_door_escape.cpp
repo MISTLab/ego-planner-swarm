@@ -56,7 +56,8 @@ TEST_F(DoorEscape, R7InflatedButNotRawStartEscapesOutward) {
   auto start = info.position_traj_.evaluateDeBoorT(0);
   auto end = info.position_traj_.evaluateDeBoorT(info.duration_);
   EXPECT_TRUE(start.isApprox(fsm.odom_pos_));
-  EXPECT_LT(end.y(), start.y() - .01);
+  // First free cell is y=[.8,.9); target must be a full cell past its edge.
+  EXPECT_LE(end.y(), .8);
   EXPECT_LE((end - start).norm(), .400001);
   EXPECT_EQ(map->getInflateOccupancy(end), 0);
   double previous = start.y();
@@ -68,6 +69,26 @@ TEST_F(DoorEscape, R7InflatedButNotRawStartEscapesOutward) {
   }
   fsm.checkCollisionCallback();
   EXPECT_NE(fsm.exec_state_, EGOReplanFSM::EMERGENCY_STOP);
+}
+TEST_F(DoorEscape, EscapeThenNormalPlanningOnceAndDriftDoesNotReescape) {
+  pillar();
+  const Eigen::Vector3d recorded_pose = fsm.odom_pos_;
+  fsm.planNextWaypoint({-.306, -1., 1.769});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  auto &info = fsm.planner_manager_->local_data_;
+  fsm.odom_pos_ = info.position_traj_.evaluateDeBoorT(info.duration_);
+  // Five cm of tracking error must not leave us inflated.
+  fsm.odom_pos_.y() += .05;
+  info.start_time_ = rclcpp::Clock().now() - rclcpp::Duration::from_seconds(4.);
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::EXEC_TRAJ);
+  fsm.odom_pos_ = recorded_pose;
+  fsm.execFSMCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+  EXPECT_FALSE(fsm.have_target_);
 }
 TEST_F(DoorEscape, RawOccupiedStartStillYieldsToAdapter) {
   pillar();

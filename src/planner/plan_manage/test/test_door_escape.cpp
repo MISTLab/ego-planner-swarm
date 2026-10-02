@@ -6,6 +6,7 @@ class DoorEscape : public ::testing::Test {
 protected:
   static void SetUpTestSuite() {rclcpp::init(0, nullptr);}
   static void TearDownTestSuite() {rclcpp::shutdown();}
+  virtual bool bandEnabled() {return false;}
   void SetUp() override
   {
     rclcpp::NodeOptions options;
@@ -26,13 +27,16 @@ protected:
         {"grid_map/window_size_x", 12.0}, {"grid_map/window_size_y", 6.0},
         {"grid_map/window_size_z", 4.0}, {"grid_map/resolution", 0.1},
         {"fsm/report_occupied_start", true}, {"grid_map/obstacles_inflation", 0.3},
-        {"grid_map/p_hit", 0.9}});
+        {"grid_map/p_hit", 0.9}, {"grid_map/flight_band_enabled", bandEnabled()},
+        {"grid_map/flight_band_min", 0.8}, {"grid_map/flight_band_max", 2.5},
+        {"grid_map/base_height", 0.12}});
     node = std::make_shared<rclcpp::Node>("door_escape", options);
     fsm.init(node);
     fsm.have_odom_ = true;
     fsm.odom_pos_ = Eigen::Vector3d(-.306, .945, 1.769);
     fsm.odom_vel_.setZero();
     fsm.startup_published_ = true;
+    if (bandEnabled()) {fsm.planner_manager_->grid_map_->recenter({.05, .05, .12});}
     fsm.planner_manager_->grid_map_->recenter(fsm.odom_pos_);
   }
   void pillar()
@@ -45,6 +49,26 @@ protected:
   rclcpp::Node::SharedPtr node;
   EGOReplanFSM fsm;
 };
+class BandDoorEscape : public DoorEscape {
+protected:
+  bool bandEnabled() override {return true;}
+};
+TEST_F(BandDoorEscape, BandPrefixSurvivesSafetyCheckButNotTrackingAway) {
+  auto map = fsm.planner_manager_->grid_map_;
+  fsm.odom_pos_ = {1.05, .05, .82};
+  for (int i = 0; i < 5; ++i) {
+    map->inputCloud({{1.05, .05, 3.05}}, {1.05, .05, .52});
+  }
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.checkCollisionCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.odom_pos_.z() -= .05;
+  fsm.checkCollisionCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+}
+
 TEST_F(DoorEscape, R7InflatedButNotRawStartEscapesOutward) {
   pillar();
   auto map = fsm.planner_manager_->grid_map_;

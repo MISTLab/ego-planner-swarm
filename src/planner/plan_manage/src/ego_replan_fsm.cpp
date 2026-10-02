@@ -769,6 +769,9 @@ namespace ego_planner
         planner_manager_->grid_map_->getInflateOccupancy(odom_pos_, pose_band_tolerance) != 0)
     {
       auto guard = planner_manager_->grid_map_->lock();
+      planner_manager_->grid_map_->logOccupiedStart(odom_pos_);
+      RCLCPP_WARN(node_->get_logger(), "OCCUPIED_START admission speed=%.4f attempted=%d pending_command=%d",
+                  odom_vel_.norm(), inflated_escape_attempted_, commandsPending());
       if (!inflated_escape_attempted_ && odom_vel_.norm() < 0.1 &&
           !planner_manager_->grid_map_->getOdomDepthTimeout() &&
           planner_manager_->inflatedStartEscape(odom_pos_, end_pt_) && !commandsPending())
@@ -1047,10 +1050,17 @@ namespace ego_planner
     }
 
     double escape_low, escape_high;
+    Eigen::Vector3d escape_end = odom_pos_;
+    if (exec_state_ == INFLATED_ESCAPE)
+      escape_end = info->position_traj_.evaluateDeBoorT(info->duration_);
     const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
         (map->getOccupancy(odom_pos_) != 0 ||
          (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
-          (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high)));
+          (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high) &&
+          // A band correction may still be in its certified vertical prefix.
+          // Revalidate from the actual pose as well as the original start.
+          (!map->escapeSegmentSafe(odom_pos_, escape_end) ||
+           (odom_pos_ - escape_end).norm() > (info->start_pos_ - escape_end).norm() + 1e-6)));
     if (exec_state_ == INFLATED_ESCAPE &&
         (escape_pose_blocked || !map->escapeSegmentSafe(
             info->start_pos_, info->position_traj_.evaluateDeBoorT(info->duration_))))

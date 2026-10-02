@@ -523,6 +523,24 @@ void GridMap::publishMapInflate(bool all_info)
 }
 
 
+void GridMap::logOccupiedStart(const Eigen::Vector3d &start)
+{
+  auto guard = lock();
+  const Eigen::Vector3i id = window_.indexOf(start);
+  double low = NAN, high = NAN;
+  const bool band = flightBandLimits(start, low, high);
+  const int inflated = window_.contains(id) ?
+      int(md_.occupancy_buffer_inflate_[window_.address(id)]) : -1;
+  RCLCPP_WARN(node_->get_logger(),
+      "OCCUPIED_START pose=(%.4f,%.4f,%.4f) cell=(%d,%d,%d) raw=%d inflated=%d "
+      "combined=%d flightBandLimits=(%.4f,%.4f) band=%d columnGround=%.4f "
+      "last_ground=%.4f ground_generation=%lu sensor_timeout=%d",
+      start.x(), start.y(), start.z(), id.x(), id.y(), id.z(), getOccupancy(start),
+      inflated, getInflateOccupancy(start), low, high, band, band ? columnGround(start) : NAN,
+      last_ground_, ground_generation_, getOdomDepthTimeout());
+}
+
+
 bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end)
 {
   auto guard = lock();
@@ -531,6 +549,31 @@ bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vecto
   if (!start.allFinite() || !end.allFinite() || delta.norm() > bound + 1e-9 ||
       delta.norm() < 1e-9 || getOccupancy(start) != 0 || getInflateOccupancy(end) != 0)
     return false;
+  double band_low, band_high;
+  const bool band_violation = flightBandLimits(start, band_low, band_high) &&
+      (start.z() < band_low || start.z() > band_high);
+  if (band_violation) {
+    // A policy-band violation is not a physical obstacle. Correct only
+    // vertically in a fully observed, inflation-free column, within the SAME
+    // existing escape bound. Never combine this with an obstacle exemption.
+    if (delta.head<2>().norm() > 1e-9) return false;
+    const double initial = std::max(band_low - start.z(), start.z() - band_high);
+    double previous = initial;
+    const int count = std::max(1, int(std::ceil(delta.norm() / (mp_.resolution_ * .1))));
+    for (int i = 0; i <= count; ++i) {
+      const Eigen::Vector3d p = start + delta * (double(i) / count);
+      if (!isInMap(p) || isUnknown(p) || getOccupancy(p) != 0 ||
+          md_.occupancy_buffer_inflate_[window_.address(window_.indexOf(p))] != 0)
+        return false;
+      double low, high;
+      if (!flightBandLimits(p, low, high)) return false;
+      const double violation = std::max(0.0, std::max(low - p.z(), p.z() - high));
+      if (i > 0 && ((previous > 0 && violation >= previous) ||
+                    (previous == 0 && violation > 0))) return false;
+      previous = violation;
+    }
+    return previous == 0;
+  }
   std::vector<Eigen::Vector3d> obstacles;
   const Eigen::Vector3i lo = window_.indexOf(start.cwiseMin(end) - Eigen::Vector3d::Constant(bound));
   const Eigen::Vector3i hi = window_.indexOf(start.cwiseMax(end) + Eigen::Vector3d::Constant(bound));
@@ -563,6 +606,8 @@ bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vecto
         if (away.cwiseAbs().maxCoeff() <= mp_.obstacles_inflation_ + 1e-9 &&
             away.dot(delta) <= 1e-10) return false;
       }
+  // No raw cause and no band-only certificate: unexplained inflation must
+  // not authorize an escape. The band-only case above needs no raw voxel.
   if (obstacles.empty()) return false;
   double previous = -1;
   bool left = false;
@@ -600,6 +645,10 @@ bool GridMap::inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d
     for (double distance=mp_.resolution_*.25; distance<=bound+1e-9; distance+=mp_.resolution_*.25) {
       const Eigen::Vector3d candidate = start + distance*direction;
       if (!escapeSegmentSafe(start, candidate)) continue;
+      double low, high;
+      if (flightBandLimits(start, low, high) && (start.z() < low || start.z() > high) &&
+          (candidate.z() < low + mp_.resolution_ || candidate.z() > high - mp_.resolution_))
+        continue;
       // Distance to the inflated voxel UNION, not distance travelled along
       // an oblique ray. A full cell of normal clearance tolerates tracking
       // error in any direction, including towards a corner of the boundary.

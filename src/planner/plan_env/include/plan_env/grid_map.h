@@ -131,6 +131,7 @@ public:
   bool inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d &preferred,
                       Eigen::Vector3d &end);
   bool escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end);
+  void logOccupiedStart(const Eigen::Vector3d &start);
 
   void publishMap();
   void publishMapInflate(bool all_info = false);

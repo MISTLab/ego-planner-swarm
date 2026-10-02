@@ -1053,8 +1053,14 @@ namespace ego_planner
     Eigen::Vector3d escape_end = odom_pos_;
     if (exec_state_ == INFLATED_ESCAPE)
       escape_end = info->position_traj_.evaluateDeBoorT(info->duration_);
+    double start_low, start_high;
+    const bool band_correction = exec_state_ == INFLATED_ESCAPE &&
+        map->flightBandLimits(info->start_pos_, start_low, start_high) &&
+        (info->start_pos_.z() < start_low || info->start_pos_.z() > start_high);
     const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
         (map->getOccupancy(odom_pos_) != 0 ||
+         (band_correction && map->getInflateOccupancy(
+             odom_pos_, std::numeric_limits<double>::infinity()) != 0) ||
          (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
           (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high) &&
           // A band correction may still be in its certified vertical prefix.

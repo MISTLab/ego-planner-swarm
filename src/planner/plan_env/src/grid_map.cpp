@@ -531,13 +531,25 @@ void GridMap::logOccupiedStart(const Eigen::Vector3d &start)
   const bool band = flightBandLimits(start, low, high);
   const int inflated = window_.contains(id) ?
       int(md_.occupancy_buffer_inflate_[window_.address(id)]) : -1;
+  const double bound = mp_.obstacles_inflation_ + 2 * mp_.resolution_;
+  const Eigen::Vector3i lo = window_.indexOf(start - Eigen::Vector3d::Constant(bound));
+  const Eigen::Vector3i hi = window_.indexOf(start + Eigen::Vector3d::Constant(bound));
+  int raw_near_start = 0;
+  for (int x = lo.x(); x <= hi.x(); ++x)
+    for (int y = lo.y(); y <= hi.y(); ++y)
+      for (int z = lo.z(); z <= hi.z(); ++z) {
+        const Eigen::Vector3i cell(x, y, z);
+        if (window_.contains(cell) &&
+            md_.occupancy_buffer_[window_.address(cell)] > mp_.min_occupancy_log_)
+          ++raw_near_start;
+      }
   RCLCPP_WARN(node_->get_logger(),
       "OCCUPIED_START pose=(%.4f,%.4f,%.4f) cell=(%d,%d,%d) raw=%d inflated=%d "
       "combined=%d flightBandLimits=(%.4f,%.4f) band=%d columnGround=%.4f "
-      "last_ground=%.4f ground_generation=%lu sensor_timeout=%d",
+      "last_ground=%.4f ground_generation=%lu sensor_timeout=%d raw_near_start=%d unknown=%d",
       start.x(), start.y(), start.z(), id.x(), id.y(), id.z(), getOccupancy(start),
       inflated, getInflateOccupancy(start), low, high, band, band ? columnGround(start) : NAN,
-      last_ground_, ground_generation_, getOdomDepthTimeout());
+      last_ground_, ground_generation_, getOdomDepthTimeout(), raw_near_start, isUnknown(start));
 }
 
 

@@ -440,3 +440,16 @@ TEST_F(GroundRelativeBand, UpperBandCorrectionIsAlsoBoundedAndVertical) {
   EXPECT_TRUE(map->escapeSegmentSafe(high, inside));
   EXPECT_FALSE(map->escapeSegmentSafe({1.05, .05, 3.42}, inside));
 }
+
+TEST_F(GroundRelativeBand, RaisedSupportBandCorrectionDoesNotEraseTheSupport) {
+  auto map = band();
+  observe(*map, {1.05, .05, .25}, {1.05, .05, 1.32});
+  observe(*map, {1.05, .05, 4.05}, {1.05, .05, .52});
+  const Eigen::Vector3d start(1.05, .05, 1.12), end(1.05, .05, 1.42);
+  double low, high;
+  ASSERT_TRUE(map->flightBandLimits(start, low, high));
+  EXPECT_NEAR(low, 1.22, 1e-9);
+  EXPECT_EQ(map->getInflateOccupancy(start), 1);
+  EXPECT_TRUE(map->escapeSegmentSafe(start, end));
+  EXPECT_EQ(map->getOccupancy({1.05, .05, .25}), 1);
+}

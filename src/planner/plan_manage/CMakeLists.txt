@@ -112,6 +112,14 @@ if(BUILD_TESTING)
     target_link_libraries(test_safety_command_preemption ${TRAJ_UTILS_LIB}
       "-Wl,--wrap=_ZN11ego_planner17EGOPlannerManager13reboundReplanEN5Eigen6MatrixIdLi3ELi1ELi0ELi3ELi1EEES3_S3_S3_S3_bb")
 
+    ament_add_gtest(test_door_escape
+      test/test_door_escape.cpp src/ego_replan_fsm.cpp src/planner_manager.cpp)
+    target_compile_options(test_door_escape PRIVATE -fno-access-control)
+    ament_target_dependencies(test_door_escape
+      rclcpp std_msgs nav_msgs visualization_msgs geometry_msgs quadrotor_msgs
+      plan_env path_searching bspline_opt traj_utils cv_bridge pcl_conversions)
+    target_link_libraries(test_door_escape ${TRAJ_UTILS_LIB})
+
     # The real optimizer in heap- and time-limited death-test children.
     ament_add_gtest(test_planning_bounds
       test/test_planning_bounds.cpp src/ego_replan_fsm.cpp src/planner_manager.cpp

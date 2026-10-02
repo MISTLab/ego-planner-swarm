@@ -642,7 +642,7 @@ namespace ego_planner
       replan_not_before_ = std::chrono::steady_clock::time_point();
     }
 
-    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
+    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "EXEC_TRAJ"};
     int pre_s = int(exec_state_);
     exec_state_ = new_state;
     cout << "[" + pos_call + "]: from " + state_str[pre_s] + " to " + state_str[int(new_state)] << endl;
@@ -657,14 +657,14 @@ namespace ego_planner
 
   void EGOReplanFSM::printFSMExecState()
   {
-    static string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
+    static string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "EXEC_TRAJ"};
 
     cout << "[FSM]: state: " + state_str[int(exec_state_)] << endl;
   }
 
   void EGOReplanFSM::publishFSMState()
   {
-    static const string state_str[8] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START"};
+    static const string state_str[9] = {"INIT", "WAIT_TARGET", "GEN_NEW_TRAJ", "REPLAN_TRAJ", "EXEC_TRAJ", "EMERGENCY_STOP", "SEQUENTIAL_START", "OCCUPIED_START", "EXEC_TRAJ"};
     std_msgs::msg::String msg;
     msg.data = state_str[int(exec_state_)];
     fsm_state_pub_->publish(msg);
@@ -764,9 +764,18 @@ namespace ego_planner
     // cannot recover even a small band violation, so request external retreat.
     const double pose_band_tolerance =
         (exec_state_ == EXEC_TRAJ || exec_state_ == REPLAN_TRAJ) ? 0.1 : 0.0;
-    if (report_occupied_start_ && have_odom_ && have_target_ &&
+    if (report_occupied_start_ && have_odom_ && have_target_ && exec_state_ != INFLATED_ESCAPE &&
         planner_manager_->grid_map_->getInflateOccupancy(odom_pos_, pose_band_tolerance) != 0)
     {
+      auto guard = planner_manager_->grid_map_->lock();
+      if (odom_vel_.norm() < 0.1 && !planner_manager_->grid_map_->getOdomDepthTimeout() &&
+          planner_manager_->inflatedStartEscape(odom_pos_, end_pt_))
+      {
+        publishLocalTrajectory();
+        publishSwarmTrajs(false);
+        changeFSMExecState(INFLATED_ESCAPE, "INFLATED_ESCAPE");
+        goto force_return;
+      }
       callEmergencyStop(odom_pos_);
       publishSwarmTrajs(false);
       have_target_ = false;
@@ -783,6 +792,24 @@ namespace ego_planner
         goto force_return;
       }
       changeFSMExecState(WAIT_TARGET, "FSM");
+      break;
+    }
+
+    case INFLATED_ESCAPE:
+    {
+      auto &info = planner_manager_->local_data_;
+      if ((rclcpp::Clock().now()-info.start_time_).seconds() >= info.duration_)
+      {
+        if (planner_manager_->grid_map_->getInflateOccupancy(odom_pos_) == 0)
+          changeFSMExecState(GEN_NEW_TRAJ, "ESCAPED");
+        else
+        {
+          callEmergencyStop(odom_pos_);
+          have_target_ = false;
+          have_pending_goal_ = false;
+          changeFSMExecState(OCCUPIED_START, "ESCAPE_NOT_TRACKED");
+        }
+      }
       break;
     }
 
@@ -1016,6 +1043,16 @@ namespace ego_planner
       return; // local_data_ now holds the stop, not the trajectory below
     }
 
+    if (exec_state_ == INFLATED_ESCAPE &&
+        !map->escapeSegmentSafe(info->start_pos_, info->position_traj_.evaluateDeBoorT(info->duration_)))
+    {
+      callEmergencyStop(odom_pos_);
+      have_target_ = false;
+      have_pending_goal_ = false;
+      changeFSMExecState(OCCUPIED_START, "ESCAPE_BLOCKED");
+      return;
+    }
+
     /* ---------- check trajectory ---------- */
     constexpr double time_step = 0.01;
     // double t_cur = (ros::Time::now() - info->start_time_).toSec();
@@ -1033,7 +1070,9 @@ namespace ego_planner
         break;
 
       bool occ = false;
-      occ |= map->getInflateOccupancy(info->position_traj_.evaluateDeBoorT(t));
+      occ |= exec_state_ == INFLATED_ESCAPE
+          ? map->getOccupancy(info->position_traj_.evaluateDeBoorT(t)) != 0
+          : map->getInflateOccupancy(info->position_traj_.evaluateDeBoorT(t)) != 0;
 
       for (size_t id = 0; id < planner_manager_->swarm_trajs_buf_.size(); id++)
       {
@@ -1055,7 +1094,14 @@ namespace ego_planner
 
       if (occ)
       {
-
+        if (exec_state_ == INFLATED_ESCAPE)
+        {
+          callEmergencyStop(odom_pos_);
+          have_target_ = false;
+          have_pending_goal_ = false;
+          changeFSMExecState(OCCUPIED_START, "ESCAPE_COLLISION");
+          return;
+        }
         // A queued goal must not discard the escape from a known collision.
         if (planFromCurrentTraj(1, false)) // Make a chance
         {
@@ -1206,6 +1252,12 @@ namespace ego_planner
 
     planner_manager_->EmergencyStop(stop_pos);
 
+    publishLocalTrajectory();
+    return true;
+  }
+
+  void EGOReplanFSM::publishLocalTrajectory()
+  {
     auto info = &planner_manager_->local_data_;
 
     /* publish traj */
@@ -1234,7 +1286,6 @@ namespace ego_planner
 
     bspline_pub_->publish(bspline);
 
-    return true;
   }
 
   void EGOReplanFSM::getLocalTarget()

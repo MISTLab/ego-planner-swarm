@@ -521,3 +521,85 @@ void GridMap::publishMapInflate(bool all_info)
   pcl::toROSMsg(cloud, cloud_msg);
   map_inf_pub_->publish(cloud_msg);
 }
+
+
+bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end)
+{
+  auto guard = lock();
+  const double bound = mp_.obstacles_inflation_ + mp_.resolution_;
+  const Eigen::Vector3d delta = end - start;
+  if (!start.allFinite() || !end.allFinite() || delta.norm() > bound + 1e-9 ||
+      delta.norm() < 1e-9 || getOccupancy(start) != 0 || getInflateOccupancy(end) != 0)
+    return false;
+  std::vector<Eigen::Vector3d> obstacles;
+  const Eigen::Vector3i lo = window_.indexOf(start.cwiseMin(end) - Eigen::Vector3d::Constant(bound));
+  const Eigen::Vector3i hi = window_.indexOf(start.cwiseMax(end) + Eigen::Vector3d::Constant(bound));
+  const double half = mp_.resolution_ * .5;
+  for (int x=lo.x(); x<=hi.x(); ++x)
+    for (int y=lo.y(); y<=hi.y(); ++y)
+      for (int z=lo.z(); z<=hi.z(); ++z) {
+        const Eigen::Vector3i id(x,y,z);
+        if (!window_.contains(id)) continue;
+        if (md_.occupancy_buffer_[window_.address(id)] <= mp_.min_occupancy_log_) continue;
+        const Eigen::Vector3d c = window_.centerOf(id);
+        obstacles.push_back(c);
+        // Exact segment/raw-voxel intersection, including touching.
+        double first=0, last=1;
+        for (int axis=0; axis<3; ++axis) {
+          if (std::abs(delta[axis]) < 1e-12) {
+            if (std::abs(start[axis]-c[axis]) > half) { first=2; break; }
+          } else {
+            double a=(c[axis]-half-start[axis])/delta[axis];
+            double b=(c[axis]+half-start[axis])/delta[axis];
+            if (a>b) std::swap(a,b);
+            first=std::max(first,a); last=std::min(last,b);
+          }
+        }
+        if (first<=last) return false;
+        // Strictly outward from every raw cube inside the initial inflation.
+        const Eigen::Vector3d closest = start.cwiseMax(c-Eigen::Vector3d::Constant(half))
+                                           .cwiseMin(c+Eigen::Vector3d::Constant(half));
+        const Eigen::Vector3d away = start-closest;
+        if (away.cwiseAbs().maxCoeff() <= mp_.obstacles_inflation_ + 1e-9 &&
+            away.dot(delta) <= 1e-10) return false;
+      }
+  if (obstacles.empty()) return false;
+  double previous = -1;
+  bool left = false;
+  const int count = std::max(1, int(std::ceil(delta.norm() / (mp_.resolution_ * .1))));
+  for (int i=0; i<=count; ++i) {
+    const Eigen::Vector3d p = start + delta * (double(i)/count);
+    if (!isInMap(p) || getOccupancy(p) != 0) return false;
+    double low, high;
+    if (flightBandLimits(p, low, high) && (p.z()<low || p.z()>high)) return false;
+    double clearance = std::numeric_limits<double>::infinity();
+    for (const auto &c : obstacles)
+      clearance = std::min(clearance, ((p-c).cwiseAbs()-Eigen::Vector3d::Constant(half)).cwiseMax(0).norm());
+    if (!left && i>0 && clearance <= previous + 1e-10) return false;
+    const bool occupied = getInflateOccupancy(p) != 0;
+    if (left && occupied) return false;
+    if (!occupied) left = true;
+    previous = clearance;
+  }
+  return left;
+}
+
+bool GridMap::inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d &preferred,
+                            Eigen::Vector3d &end)
+{
+  auto guard = lock();
+  if (getOccupancy(start) != 0 || getInflateOccupancy(start) != 1) return false;
+  std::vector<Eigen::Vector3d> directions;
+  if ((preferred-start).norm()>1e-9) directions.push_back((preferred-start).normalized());
+  for (int x=-1; x<=1; ++x)
+    for (int y=-1; y<=1; ++y)
+      for (int z=-1; z<=1; ++z)
+        if (x || y || z) directions.push_back(Eigen::Vector3d(x,y,z).normalized());
+  const double bound = mp_.obstacles_inflation_ + mp_.resolution_;
+  for (const auto &direction : directions)
+    for (double distance=mp_.resolution_*.25; distance<=bound+1e-9; distance+=mp_.resolution_*.25) {
+      const Eigen::Vector3d candidate = start + distance*direction;
+      if (escapeSegmentSafe(start, candidate)) { end=candidate; return true; }
+    }
+  return false;
+}

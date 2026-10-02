@@ -433,6 +433,25 @@ namespace ego_planner
     return true;
   }
 
+  bool EGOPlannerManager::inflatedStartEscape(const Eigen::Vector3d &start,
+                                               const Eigen::Vector3d &goal)
+  {
+    auto guard = grid_map_->lock();
+    Eigen::Vector3d end;
+    if (!grid_map_->inflatedEscape(start, goal, end)) return false;
+    Eigen::MatrixXd controls(3, 6);
+    for (int i=0; i<6; ++i) controls.col(i) = i<3 ? start : end;
+    // Repeated endpoints: zero velocity and acceleration, monotone straight
+    // cubic, 3 s duration (at most inflation + one cell of travel).
+    const auto previous = local_data_;
+    updateTrajInfo(UniformBspline(controls, 3, 1.0), rclcpp::Clock().now());
+    for (size_t id=0; id<swarm_trajs_buf_.size(); ++id) {
+      if (swarm_trajs_buf_[id].drone_id != int(id) || int(id) == pp_.drone_id) continue;
+      if (checkCollision(int(id))) { local_data_ = previous; return false; }
+    }
+    return true;
+  }
+
   bool EGOPlannerManager::EmergencyStop(Eigen::Vector3d stop_pos)
   {
     Eigen::MatrixXd control_points(3, 6);

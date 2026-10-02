@@ -127,6 +127,11 @@ public:
   /** True while no lidar cloud has arrived for grid_map/odom_depth_timeout s */
   bool getOdomDepthTimeout() { auto guard = lock(); return md_.flag_sensor_timeout_; }
 
+  // Inflation-only departure: bounded straight motion, no raw-cell exemption.
+  bool inflatedEscape(const Eigen::Vector3d &start, const Eigen::Vector3d &preferred,
+                      Eigen::Vector3d &end);
+  bool escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vector3d &end);
+
   void publishMap();
   void publishMapInflate(bool all_info = false);
 

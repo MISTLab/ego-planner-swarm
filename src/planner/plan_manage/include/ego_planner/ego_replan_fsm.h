@@ -47,7 +47,8 @@ namespace ego_planner
       EXEC_TRAJ,
       EMERGENCY_STOP,
       SEQUENTIAL_START,
-      OCCUPIED_START
+      OCCUPIED_START,
+      INFLATED_ESCAPE
     };
     enum TARGET_TYPE
     {
@@ -139,6 +140,7 @@ namespace ego_planner
 
     /* helper functions */
     bool callReboundReplan(bool flag_use_poly_init, bool flag_randomPolyTraj, bool preemptible = true);
+    void publishLocalTrajectory();
     bool callEmergencyStop(Eigen::Vector3d stop_pos);                          // front-end and back-end method
     bool planFromGlobalTraj(const int trial_times = 1);
     bool planFromCurrentTraj(const int trial_times = 1, bool preemptible = true);

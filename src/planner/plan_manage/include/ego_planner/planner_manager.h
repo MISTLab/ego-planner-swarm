@@ -45,6 +45,7 @@ namespace ego_planner
     double getSwarmClearance(void) { return bspline_optimizer_->getSwarmClearance(); }
 
     bool checkCollision(int drone_id);
+    bool inflatedStartEscape(const Eigen::Vector3d &start, const Eigen::Vector3d &goal);
     
 
     PlanParameters pp_;

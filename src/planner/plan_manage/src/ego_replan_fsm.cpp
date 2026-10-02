@@ -679,7 +679,7 @@ namespace ego_planner
   {
     have_target_ = false;
     have_pending_goal_ = false;
-    if (exec_state_ == GEN_NEW_TRAJ || exec_state_ == REPLAN_TRAJ || exec_state_ == EXEC_TRAJ || exec_state_ == EMERGENCY_STOP)
+    if (exec_state_ == GEN_NEW_TRAJ || exec_state_ == REPLAN_TRAJ || exec_state_ == EXEC_TRAJ || exec_state_ == EMERGENCY_STOP || exec_state_ == INFLATED_ESCAPE)
     {
       // A real stop: traj_server would otherwise fly the rest of the last trajectory.
       callEmergencyStop(odom_pos_);
@@ -769,7 +769,7 @@ namespace ego_planner
     {
       auto guard = planner_manager_->grid_map_->lock();
       if (odom_vel_.norm() < 0.1 && !planner_manager_->grid_map_->getOdomDepthTimeout() &&
-          planner_manager_->inflatedStartEscape(odom_pos_, end_pt_))
+          planner_manager_->inflatedStartEscape(odom_pos_, end_pt_) && !commandsPending())
       {
         publishLocalTrajectory();
         publishSwarmTrajs(false);
@@ -1072,7 +1072,7 @@ namespace ego_planner
     double t_2_3 = info->duration_ * 2 / 3;
     for (double t = t_cur; t < info->duration_; t += time_step)
     {
-      if (t_cur < t_2_3 && t >= t_2_3) // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
+      if (exec_state_ != INFLATED_ESCAPE && t_cur < t_2_3 && t >= t_2_3) // If t_cur < t_2_3, only the first 2/3 partition of the trajectory is considered valid and will get checked.
         break;
 
       bool occ = false;
@@ -1088,8 +1088,14 @@ namespace ego_planner
         }
 
         double t_X = t_cur_global - planner_manager_->swarm_trajs_buf_.at(id).start_time_.seconds();
+        if (exec_state_ == INFLATED_ESCAPE) {
+          t_X += t - t_cur;
+          if (t_X < 0 || t_X > planner_manager_->swarm_trajs_buf_.at(id).duration_) continue;
+        }
         Eigen::Vector3d swarm_pridicted = planner_manager_->swarm_trajs_buf_.at(id).position_traj_.evaluateDeBoorT(t_X);
-        double dist = (p_cur - swarm_pridicted).norm();
+        const Eigen::Vector3d ours = exec_state_ == INFLATED_ESCAPE
+            ? info->position_traj_.evaluateDeBoorT(t) : p_cur;
+        double dist = (ours - swarm_pridicted).norm();
 
         if (dist < CLEARANCE)
         {

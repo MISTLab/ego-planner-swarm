@@ -301,6 +301,14 @@ class GroundRelativeBand : public RollingGridMap {
     map->recenter({0.05, 0.05, 1.32});
     return map;
   }
+  // Observe the band-correction tracking tube around x=1.05, y=.05: the
+  // centre column and its four edge neighbours, from `origin_z` to `hit_z`.
+  static void observeTube(GridMap& map, double hit_z, double origin_z) {
+    for (const auto& c : {Eigen::Vector2d(1.05, .05), Eigen::Vector2d(.95, .05),
+                          Eigen::Vector2d(1.15, .05), Eigen::Vector2d(1.05, -.05),
+                          Eigen::Vector2d(1.05, .15)})
+      observe(map, {c.x(), c.y(), hit_z}, {c.x(), c.y(), origin_z});
+  }
 };
 
 TEST_F(GroundRelativeBand, BlocksWholeHalfSpacesNotJustOneCeilingVoxel) {
@@ -410,8 +418,8 @@ TEST_F(GroundRelativeBand, LeavesInBandOccupancyToUpstreamCollisionChecks) {
 TEST_F(GroundRelativeBand, BandOnlyStartCanCorrectVerticallyThroughObservedFreeColumn) {
   auto map = band();
   const Eigen::Vector3d low(1.05, .05, .82), inside(1.05, .05, 1.12);
-  // Clear the correction column; the raw endpoint is beyond the escape bound.
-  observe(*map, {1.05, .05, 4.05}, {1.05, .05, .52});
+  // Clear the correction tube; the raw endpoints are beyond the escape bound.
+  observeTube(*map, 4.05, .52);
   ASSERT_EQ(map->getOccupancy(low), 0);
   ASSERT_EQ(map->getInflateOccupancy(low), 1);
   EXPECT_TRUE(map->escapeSegmentSafe(low, inside));
@@ -436,7 +444,7 @@ TEST_F(GroundRelativeBand, BandCorrectionRejectsUnknownAndInflatedColumns) {
 TEST_F(GroundRelativeBand, UpperBandCorrectionIsAlsoBoundedAndVertical) {
   auto map = band();
   const Eigen::Vector3d high(1.05, .05, 2.72), inside(1.05, .05, 2.42);
-  observe(*map, {1.05, .05, 4.05}, {1.05, .05, 1.32});
+  observeTube(*map, 4.05, 1.32);
   EXPECT_TRUE(map->escapeSegmentSafe(high, inside));
   EXPECT_FALSE(map->escapeSegmentSafe({1.05, .05, 3.42}, inside));
 }
@@ -444,7 +452,7 @@ TEST_F(GroundRelativeBand, UpperBandCorrectionIsAlsoBoundedAndVertical) {
 TEST_F(GroundRelativeBand, RaisedSupportBandCorrectionDoesNotEraseTheSupport) {
   auto map = band();
   observe(*map, {1.05, .05, .25}, {1.05, .05, 1.32});
-  observe(*map, {1.05, .05, 4.05}, {1.05, .05, .52});
+  observeTube(*map, 4.05, .52);
   const Eigen::Vector3d start(1.05, .05, 1.12), end(1.05, .05, 1.42);
   double low, high;
   ASSERT_TRUE(map->flightBandLimits(start, low, high));
@@ -462,8 +470,7 @@ TEST_F(GroundRelativeBand, BandCorrectionAdmissionCertifiesTheWholeTrackingTube)
   observe(*map, {1.05, .05, 4.05}, {1.05, .05, .52});
   EXPECT_FALSE(map->bandEscapeTrackingSafe(low, inside, low));
   EXPECT_FALSE(map->escapeSegmentSafe(low, inside));
-  for (double x : {.95, 1.15}) observe(*map, {x, .05, 4.05}, {x, .05, .52});
-  for (double y : {-.05, .15}) observe(*map, {1.05, y, 4.05}, {1.05, y, .52});
+  observeTube(*map, 4.05, .52);
   EXPECT_TRUE(map->bandEscapeTrackingSafe(low, inside, low));
   EXPECT_TRUE(map->escapeSegmentSafe(low, inside));
 }

@@ -559,20 +559,30 @@ bool GridMap::bandEscapeTrackingSafe(const Eigen::Vector3d &start,
 {
   auto guard = lock();
   const double radius = mp_.resolution_ * .5;
+  // Vertical regression tolerance behind the start: the escape spline repeats
+  // its start control points, so for the first ticks the setpoint is the
+  // start and odometry shows hover noise (about 1 cm) plus any residual
+  // admission speed (< 0.1 m/s, arrested within ~0.2 s: about 2 cm). 0.3 cell
+  // (3 cm at 0.1 m) covers both and stays strictly under half a cell. The
+  // regressed part of the column is certified below, on every tick.
+  const double regression = mp_.resolution_ * .3;
   const double dz = end.z() - start.z();
+  const double direction = dz > 0 ? 1. : -1.;
   if (!start.allFinite() || !end.allFinite() || !pose.allFinite() ||
       (end - start).head<2>().norm() > 1e-9 || std::abs(dz) < 1e-9 ||
       std::abs(dz) > mp_.obstacles_inflation_ + 2 * mp_.resolution_ + 1e-9 ||
       (pose - start).head<2>().norm() > radius + 1e-9 ||
-      (pose.z() - start.z()) * dz < -1e-9 ||
+      (pose.z() - start.z()) * direction < -regression - 1e-9 ||
       !isInMap(pose) || isUnknown(pose) || getOccupancy(pose) != 0 ||
       getInflateOccupancy(pose, std::numeric_limits<double>::infinity()) != 0)
     return false;
   // Project measured progress onto the PLANNED vertical segment. A small
   // lateral tracking error must not turn it into a diagonal escape. Check
   // every voxel intersecting the closed tube, not just sparse radial samples.
-  const double z = std::clamp(pose.z(), std::min(start.z(), end.z()),
-                             std::max(start.z(), end.z()));
+  // A regressed pose extends the tube back to the pose itself.
+  const double behind = start.z() - direction * regression;
+  const double z = std::clamp(pose.z(), std::min(behind, end.z()),
+                             std::max(behind, end.z()));
   if ((pose.z() - end.z()) * dz > 0 && getInflateOccupancy(pose) != 0)
     return false;
   const Eigen::Vector3d low(start.x() - radius - 1e-9,
@@ -638,7 +648,9 @@ bool GridMap::escapeSegmentSafe(const Eigen::Vector3d &start, const Eigen::Vecto
                     (previous == 0 && violation > 0))) return false;
       previous = violation;
     }
-    return previous == 0;
+    // Admit only what in-flight tracking will accept on its first tick: the
+    // same half-cell tube, not just the centre line.
+    return previous == 0 && bandEscapeTrackingSafe(start, end, start);
   }
   std::vector<Eigen::Vector3d> obstacles;
   const Eigen::Vector3i lo = window_.indexOf(start.cwiseMin(end) - Eigen::Vector3d::Constant(bound));

@@ -377,6 +377,30 @@ protected:
       }
     }
   }
+  void admitCorrection()
+  {
+    fsm.odom_pos_ = {1.05, .05, .82};
+    observeTube();
+    fsm.planNextWaypoint({1.05, .05, 1.32});
+    fsm.execFSMCallback();
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  }
+  void expireCorrection()
+  {
+    auto & info = fsm.planner_manager_->local_data_;
+    info.start_time_ = rclcpp::Clock().now() -
+      rclcpp::Duration::from_seconds(info.duration_ + .1);
+  }
+  void expectStopped()
+  {
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+    EXPECT_FALSE(fsm.have_target_);
+    EXPECT_FALSE(fsm.have_pending_goal_);
+    const auto controls = fsm.planner_manager_->local_data_.position_traj_.getControlPoint();
+    for (int i = 0; i < controls.cols(); ++i) {
+      EXPECT_TRUE(controls.col(i).isApprox(fsm.odom_pos_));
+    }
+  }
   void reachEnd()
   {
     auto & info = fsm.planner_manager_->local_data_;
@@ -388,6 +412,65 @@ protected:
     EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
   }
 };
+
+TEST_F(BandCorrection, ExecFirstCompletionInUnknownAirStops) {
+  admitCorrection();
+  fsm.odom_pos_ = {1.25, .05, 1.12};
+  auto map = fsm.planner_manager_->grid_map_;
+  ASSERT_TRUE(map->isUnknown(fsm.odom_pos_));
+  ASSERT_EQ(map->getInflateOccupancy(fsm.odom_pos_), 0);
+  expireCorrection();
+  fsm.execFSMCallback();
+  expectStopped();
+  fsm.checkCollisionCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+}
+
+TEST_F(BandCorrection, ExecFirstCompletionOutsideObservedTubeStops) {
+  admitCorrection();
+  fsm.odom_pos_ = {1.12, .05, 1.12};
+  auto map = fsm.planner_manager_->grid_map_;
+  ASSERT_FALSE(map->isUnknown(fsm.odom_pos_));
+  ASSERT_EQ(map->getInflateOccupancy(fsm.odom_pos_), 0);
+  expireCorrection();
+  fsm.execFSMCallback();
+  expectStopped();
+}
+
+TEST_F(BandCorrection, ExecFirstGoodCompletionReachesEscaped) {
+  admitCorrection();
+  auto & info = fsm.planner_manager_->local_data_;
+  fsm.odom_pos_ = info.position_traj_.evaluateDeBoorT(info.duration_);
+  fsm.odom_pos_.x() += .03;
+  expireCorrection();
+  fsm.execFSMCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
+  EXPECT_TRUE(fsm.have_target_);
+}
+
+TEST_F(BandCorrection, ExecFirstCompletionStillOutsideBandStops) {
+  admitCorrection();
+  // A safe prefix is not a completed correction: strict band admission remains.
+  expireCorrection();
+  fsm.execFSMCallback();
+  expectStopped();
+}
+
+TEST_F(BandCorrection, NewGoalBeforeSafetyCannotBypassTrackingCheck) {
+  admitCorrection();
+  fsm.odom_pos_ = {1.25, .05, 1.12};
+  fsm.planNextWaypoint({1.05, .05, 1.52});
+  expectStopped();
+}
+
+TEST_F(BandCorrection, NewGoalFromSafeTrackingPoseStillAdmitted) {
+  admitCorrection();
+  fsm.odom_pos_.z() = 1.12;
+  fsm.planNextWaypoint({1.05, .05, 1.52});
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
+  EXPECT_TRUE(fsm.have_target_);
+  EXPECT_TRUE(fsm.end_pt_.isApprox(Eigen::Vector3d(1.05, .05, 1.52)));
+}
 
 TEST_F(BandCorrection, HoverNoiseDipDuringBandCorrectionReachesEscaped) {
   fsm.odom_pos_ = {1.05, .05, .82};

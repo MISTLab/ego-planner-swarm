@@ -365,7 +365,7 @@ class BandCorrection : public BandDoorEscape {
 protected:
   // Observe every column of the plus-shaped half-cell tube around x=1.05,
   // y=.05 from z=.52 up, except `skip`.
-  void observeTube(const Eigen::Vector2d &skip = {NAN, NAN})
+  void observeTube(const Eigen::Vector2d & skip = {NAN, NAN})
   {
     auto map = fsm.planner_manager_->grid_map_;
     for (int i = 0; i < 5; ++i) {

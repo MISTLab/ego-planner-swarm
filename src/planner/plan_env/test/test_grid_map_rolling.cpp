@@ -453,3 +453,17 @@ TEST_F(GroundRelativeBand, RaisedSupportBandCorrectionDoesNotEraseTheSupport) {
   EXPECT_TRUE(map->escapeSegmentSafe(start, end));
   EXPECT_EQ(map->getOccupancy({1.05, .05, .25}), 1);
 }
+
+TEST_F(GroundRelativeBand, BandCorrectionAdmissionCertifiesTheWholeTrackingTube) {
+  auto map = band();
+  const Eigen::Vector3d low(1.05, .05, .82), inside(1.05, .05, 1.12);
+  // Only the centre column observed: the tracking tube's edge columns are
+  // unknown, so admission must refuse what tracking would stop at once.
+  observe(*map, {1.05, .05, 4.05}, {1.05, .05, .52});
+  EXPECT_FALSE(map->bandEscapeTrackingSafe(low, inside, low));
+  EXPECT_FALSE(map->escapeSegmentSafe(low, inside));
+  for (double x : {.95, 1.15}) observe(*map, {x, .05, 4.05}, {x, .05, .52});
+  for (double y : {-.05, .15}) observe(*map, {1.05, y, 4.05}, {1.05, y, .52});
+  EXPECT_TRUE(map->bandEscapeTrackingSafe(low, inside, low));
+  EXPECT_TRUE(map->escapeSegmentSafe(low, inside));
+}

@@ -68,7 +68,8 @@ TEST_F(BandDoorEscape, BandPrefixSurvivesSafetyCheckButNotTrackingAway) {
   ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
   fsm.checkCollisionCallback();
   ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
-  fsm.odom_pos_.z() -= .05;
+  // Well beyond both the 3 cm regression tolerance and half a cell.
+  fsm.odom_pos_.z() -= .06;
   fsm.checkCollisionCallback();
   EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
 }
@@ -355,5 +356,110 @@ TEST_F(BandDoorEscape, PhysicalInflationEnteringTrackingTubeStopsEscape) {
   ASSERT_EQ(map->getInflateOccupancy({1.14, .05, .95}, INFINITY), 1);
   fsm.checkCollisionCallback();
   EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+}
+}
+
+namespace ego_planner
+{
+class BandCorrection : public BandDoorEscape {
+protected:
+  // Observe every column of the plus-shaped half-cell tube around x=1.05,
+  // y=.05 from z=.52 up, except `skip`.
+  void observeTube(const Eigen::Vector2d &skip = {NAN, NAN})
+  {
+    auto map = fsm.planner_manager_->grid_map_;
+    for (int i = 0; i < 5; ++i) {
+      for (double x : {.95, 1.05, 1.15}) {
+        for (double y : {-.05, .05, .15}) {
+          if (std::abs(x - skip.x()) < 1e-9 && std::abs(y - skip.y()) < 1e-9) {continue;}
+          map->inputCloud({{x, y, 3.05}}, {x, y, .52});
+        }
+      }
+    }
+  }
+  void reachEnd()
+  {
+    auto & info = fsm.planner_manager_->local_data_;
+    fsm.odom_pos_ = info.position_traj_.evaluateDeBoorT(info.duration_);
+    info.start_time_ = rclcpp::Clock().now() - rclcpp::Duration::from_seconds(4.);
+    fsm.checkCollisionCallback();
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+    fsm.execFSMCallback();
+    EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::GEN_NEW_TRAJ);
+  }
+};
+
+TEST_F(BandCorrection, HoverNoiseDipDuringBandCorrectionReachesEscaped) {
+  fsm.odom_pos_ = {1.05, .05, .82};
+  observeTube();
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  for (double z : {.81, .83, .815, .82}) {
+    fsm.odom_pos_.z() = z;
+    fsm.checkCollisionCallback();
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE) << "z=" << z;
+  }
+  reachEnd();
+}
+
+TEST_F(BandCorrection, ResidualDownwardSpeedAtAdmissionReachesEscaped) {
+  fsm.odom_pos_ = {1.05, .05, .82};
+  fsm.odom_vel_ = {0., 0., -.09};
+  observeTube();
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  // The repeated start control points barely move the setpoint at first:
+  // the residual descent continues for a few safety ticks before arrest.
+  for (double z : {.815, .805, .795, .80, .81}) {
+    fsm.odom_pos_.z() = z;
+    fsm.checkCollisionCallback();
+    ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE) << "z=" << z;
+  }
+  reachEnd();
+}
+
+TEST_F(BandCorrection, DipJustBeyondRegressionToleranceAborts) {
+  fsm.odom_pos_ = {1.05, .05, .82};
+  observeTube();
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  ASSERT_EQ(fsm.exec_state_, EGOReplanFSM::INFLATED_ESCAPE);
+  fsm.odom_pos_.z() = .78;
+  fsm.checkCollisionCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+}
+
+TEST_F(BandCorrection, UnknownNeighbourColumnRefusesAdmissionWithoutUsingTheAttempt) {
+  fsm.odom_pos_ = {1.05, .05, .82};
+  observeTube({1.15, .05});
+  auto map = fsm.planner_manager_->grid_map_;
+  ASSERT_TRUE(map->isUnknown({1.15, .05, .95}));
+  ASSERT_FALSE(map->isUnknown({1.05, .05, .95}));
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+  EXPECT_FALSE(fsm.inflated_escape_attempted_);
+}
+
+TEST_F(BandCorrection, InflatedNeighbourColumnRefusesAdmissionWithoutUsingTheAttempt) {
+  fsm.odom_pos_ = {1.05, .05, .82};
+  observeTube();
+  auto map = fsm.planner_manager_->grid_map_;
+  // Raw voxel low and to the side: its inflation reaches the x=1.15 column
+  // of the tube near the start, but neither the centre column nor within a
+  // cell of the corrected endpoint.
+  for (int i = 0; i < 5; ++i) {
+    map->inputCloud({{1.45, .05, .55}}, {1.65, .05, .55});
+  }
+  ASSERT_EQ(map->getOccupancy({1.45, .05, .55}), 1);
+  ASSERT_EQ(map->getInflateOccupancy({1.05, .05, .85}, INFINITY), 0);
+  ASSERT_EQ(map->getInflateOccupancy({1.15, .05, .85}, INFINITY), 1);
+  ASSERT_EQ(map->getInflateOccupancy({1.15, .05, .95}, INFINITY), 0);
+  fsm.planNextWaypoint({1.05, .05, 1.32});
+  fsm.execFSMCallback();
+  EXPECT_EQ(fsm.exec_state_, EGOReplanFSM::OCCUPIED_START);
+  EXPECT_FALSE(fsm.inflated_escape_attempted_);
 }
 }

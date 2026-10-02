@@ -309,6 +309,16 @@ namespace ego_planner
         changeFSMExecState(EMERGENCY_STOP, "SAFETY");
       return;
     }
+    // A goal may arrive on the 10 ms exec tick before the 50 ms safety tick.
+    // Do not retire escape tracking while its still-flown spline is unsafe.
+    if (exec_state_ == INFLATED_ESCAPE && !escapePoseSafe())
+    {
+      callEmergencyStop(odom_pos_);
+      have_target_ = false;
+      have_pending_goal_ = false;
+      changeFSMExecState(OCCUPIED_START, "ESCAPE_BLOCKED");
+      return;
+    }
     have_pending_goal_ = false;
     bool success = false;
     success = planner_manager_->planGlobalTraj(odom_pos_, odom_vel_, Eigen::Vector3d::Zero(), next_wp, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
@@ -806,7 +816,10 @@ namespace ego_planner
       auto &info = planner_manager_->local_data_;
       if ((rclcpp::Clock().now()-info.start_time_).seconds() >= info.duration_)
       {
-        if (planner_manager_->grid_map_->getInflateOccupancy(odom_pos_) == 0)
+        // Completion must not depend on the slower safety timer running first.
+        // A certified prefix alone is insufficient: the pose must be in-band.
+        auto guard = planner_manager_->grid_map_->lock();
+        if (escapePoseSafe() && planner_manager_->grid_map_->getInflateOccupancy(odom_pos_) == 0)
           changeFSMExecState(GEN_NEW_TRAJ, "ESCAPED");
         else
         {
@@ -1025,6 +1038,23 @@ namespace ego_planner
     return true;
   }
 
+  bool EGOReplanFSM::escapePoseSafe()
+  {
+    auto map = planner_manager_->grid_map_;
+    auto guard = map->lock();
+    auto &info = planner_manager_->local_data_;
+    const Eigen::Vector3d end = info.position_traj_.evaluateDeBoorT(info.duration_);
+    double low, high;
+    const bool band_correction = map->flightBandLimits(info.start_pos_, low, high) &&
+        (info.start_pos_.z() < low || info.start_pos_.z() > high);
+    if (band_correction)
+      return map->bandEscapeTrackingSafe(info.start_pos_, end, odom_pos_);
+    return map->getOccupancy(odom_pos_) == 0 &&
+        !(map->flightBandLimits(odom_pos_, low, high) &&
+          (odom_pos_.z() < low || odom_pos_.z() > high)) &&
+        map->escapeSegmentSafe(info.start_pos_, end);
+  }
+
   void EGOReplanFSM::checkCollisionCallback()
   {
     drainInputs();
@@ -1049,22 +1079,7 @@ namespace ego_planner
       return; // local_data_ now holds the stop, not the trajectory below
     }
 
-    double escape_low, escape_high;
-    Eigen::Vector3d escape_end = odom_pos_;
-    if (exec_state_ == INFLATED_ESCAPE)
-      escape_end = info->position_traj_.evaluateDeBoorT(info->duration_);
-    double start_low, start_high;
-    const bool band_correction = exec_state_ == INFLATED_ESCAPE &&
-        map->flightBandLimits(info->start_pos_, start_low, start_high) &&
-        (info->start_pos_.z() < start_low || info->start_pos_.z() > start_high);
-    const bool escape_pose_blocked = exec_state_ == INFLATED_ESCAPE &&
-        (band_correction
-         ? !map->bandEscapeTrackingSafe(info->start_pos_, escape_end, odom_pos_)
-         : (map->getOccupancy(odom_pos_) != 0 ||
-            (map->flightBandLimits(odom_pos_, escape_low, escape_high) &&
-             (odom_pos_.z() < escape_low || odom_pos_.z() > escape_high)) ||
-            !map->escapeSegmentSafe(info->start_pos_, escape_end)));
-    if (escape_pose_blocked)
+    if (exec_state_ == INFLATED_ESCAPE && !escapePoseSafe())
     {
       callEmergencyStop(odom_pos_);
       have_target_ = false;

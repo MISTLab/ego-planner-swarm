@@ -161,6 +161,7 @@ namespace ego_planner
     /* ROS functions */
     void execFSMCallback();
     void checkCollisionCallback();
+    bool escapePoseSafe();
     void waypointCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg);
     void triggerCallback(const std::shared_ptr<const geometry_msgs::msg::PoseStamped> &msg);
     void odometryCallback(const std::shared_ptr<const nav_msgs::msg::Odometry> &msg);
